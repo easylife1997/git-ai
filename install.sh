@@ -349,24 +349,6 @@ else
     success "Successfully set up IDE/agent hooks"
 fi
 
-# Write JSON config at ~/.git-ai/config.json (only if it doesn't exist)
-CONFIG_DIR="$HOME/.git-ai"
-CONFIG_JSON_PATH="$CONFIG_DIR/config.json"
-mkdir -p "$CONFIG_DIR"
-
-if [ ! -f "$CONFIG_JSON_PATH" ]; then
-    TMP_CFG="$CONFIG_JSON_PATH.tmp.$$"
-    cat >"$TMP_CFG" <<EOF
-{
-  "git_path": "${STD_GIT_PATH}",
-  "feature_flags": {
-    "async_mode": true
-  }
-}
-EOF
-    mv -f "$TMP_CFG" "$CONFIG_JSON_PATH"
-fi
-
 # Add to PATH in all detected shell configurations
 SHELLS_CONFIGURED=""
 SHELLS_ALREADY_CONFIGURED=""

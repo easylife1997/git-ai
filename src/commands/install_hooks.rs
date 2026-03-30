@@ -286,7 +286,8 @@ pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
 
     // Get absolute path to the current binary
     let binary_path = get_current_binary_path()?;
-    persist_install_api_base_config(&binary_path, dry_run)?;
+    set_async_mode_for_first_install(dry_run)?;
+    persist_install_config(&binary_path, dry_run)?;
     let params = HookInstallerParams { binary_path };
 
     // Run async operations with smol and convert result
@@ -299,20 +300,46 @@ pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
     Ok(to_hashmap(statuses))
 }
 
-fn persist_install_api_base_config(binary_path: &Path, dry_run: bool) -> Result<bool, GitAiError> {
+/// On first-time installs (no config.json yet), enable async_mode by default.
+/// Must be called BEFORE `persist_install_config` which may create the config file.
+fn set_async_mode_for_first_install(dry_run: bool) -> Result<(), GitAiError> {
+    if dry_run {
+        return Ok(());
+    }
+
+    let is_first_install = crate::config::config_file_path_public()
+        .map(|p| !p.exists())
+        .unwrap_or(false);
+
+    if !is_first_install {
+        return Ok(());
+    }
+
+    let mut file_config = crate::config::load_file_config_public().map_err(GitAiError::Generic)?;
+    let flags = file_config
+        .feature_flags
+        .get_or_insert_with(|| serde_json::json!({}));
+    if let Some(obj) = flags.as_object_mut()
+        && !obj.contains_key("async_mode")
+    {
+        obj.insert("async_mode".to_string(), serde_json::Value::Bool(true));
+        crate::config::save_file_config(&file_config).map_err(GitAiError::Generic)?;
+    }
+
+    Ok(())
+}
+
+fn persist_install_config(binary_path: &Path, dry_run: bool) -> Result<bool, GitAiError> {
     if dry_run {
         return Ok(false);
     }
 
-    let api_base = std::env::var("API_BASE").ok().filter(|s| !s.is_empty());
-    let Some(api_base) = api_base else {
-        return Ok(false);
-    };
-
     let mut file_config = crate::config::load_file_config_public().map_err(GitAiError::Generic)?;
     let mut changed = false;
 
-    if file_config.api_base_url.as_deref() != Some(api_base.as_str()) {
+    if let Some(api_base) = std::env::var("API_BASE").ok().filter(|s| !s.is_empty())
+        && file_config.api_base_url.as_deref() != Some(api_base.as_str())
+    {
         file_config.api_base_url = Some(api_base);
         changed = true;
     }
@@ -931,8 +958,7 @@ mod tests {
         let _userprofile = EnvVarGuard::set("USERPROFILE", temp.path().to_str().unwrap());
         let _api_base = EnvVarGuard::set("API_BASE", "https://enterprise.example");
 
-        let changed =
-            persist_install_api_base_config(&test_binary_path(&install_dir), false).unwrap();
+        let changed = persist_install_config(&test_binary_path(&install_dir), false).unwrap();
 
         assert!(changed);
 
@@ -976,7 +1002,7 @@ mod tests {
         })
         .unwrap();
 
-        persist_install_api_base_config(&test_binary_path(&install_dir), false).unwrap();
+        persist_install_config(&test_binary_path(&install_dir), false).unwrap();
 
         let config = crate::config::load_file_config_public().unwrap();
         assert_eq!(
@@ -988,7 +1014,56 @@ mod tests {
 
     #[test]
     #[serial]
-    fn persist_install_api_base_skips_without_env_or_in_dry_run() {
+    fn set_async_mode_enables_on_first_install() {
+        let temp = tempdir().unwrap();
+
+        let _home = EnvVarGuard::set("HOME", temp.path().to_str().unwrap());
+        #[cfg(windows)]
+        let _userprofile = EnvVarGuard::set("USERPROFILE", temp.path().to_str().unwrap());
+
+        // First-time install (no config.json) should enable async_mode
+        set_async_mode_for_first_install(false).unwrap();
+        let config = crate::config::load_file_config_public().unwrap();
+        let async_mode = config
+            .feature_flags
+            .as_ref()
+            .and_then(|f| f.get("async_mode"))
+            .and_then(|v| v.as_bool());
+        assert_eq!(async_mode, Some(true));
+
+        // Second call (config.json now exists) should not change anything
+        // Delete and recreate with async_mode: false to verify it's not overwritten
+        crate::config::save_file_config(&crate::config::FileConfig {
+            feature_flags: Some(serde_json::json!({"async_mode": false})),
+            ..Default::default()
+        })
+        .unwrap();
+        set_async_mode_for_first_install(false).unwrap();
+        let config = crate::config::load_file_config_public().unwrap();
+        let async_mode = config
+            .feature_flags
+            .as_ref()
+            .and_then(|f| f.get("async_mode"))
+            .and_then(|v| v.as_bool());
+        assert_eq!(async_mode, Some(false)); // not overwritten
+    }
+
+    #[test]
+    #[serial]
+    fn set_async_mode_skips_in_dry_run() {
+        let temp = tempdir().unwrap();
+
+        let _home = EnvVarGuard::set("HOME", temp.path().to_str().unwrap());
+        #[cfg(windows)]
+        let _userprofile = EnvVarGuard::set("USERPROFILE", temp.path().to_str().unwrap());
+
+        set_async_mode_for_first_install(true).unwrap();
+        assert!(!temp.path().join(".git-ai").join("config.json").exists());
+    }
+
+    #[test]
+    #[serial]
+    fn persist_install_config_skips_without_changes() {
         let temp = tempdir().unwrap();
         let install_dir = temp.path().join("bin");
         fs::create_dir_all(&install_dir).unwrap();
@@ -999,16 +1074,218 @@ mod tests {
         let _userprofile = EnvVarGuard::set("USERPROFILE", temp.path().to_str().unwrap());
         let _api_base = EnvVarGuard::remove("API_BASE");
 
-        let changed =
-            persist_install_api_base_config(&test_binary_path(&install_dir), false).unwrap();
+        // No API_BASE and no git-og marker → no changes, no config created
+        let changed = persist_install_config(&test_binary_path(&install_dir), false).unwrap();
         assert!(!changed);
         assert!(!temp.path().join(".git-ai").join("config.json").exists());
+    }
 
+    #[test]
+    #[serial]
+    fn persist_install_config_skips_in_dry_run() {
+        let temp = tempdir().unwrap();
+        let install_dir = temp.path().join("bin");
+        fs::create_dir_all(&install_dir).unwrap();
+        fs::write(test_binary_path(&install_dir), "").unwrap();
+
+        let _home = EnvVarGuard::set("HOME", temp.path().to_str().unwrap());
+        #[cfg(windows)]
+        let _userprofile = EnvVarGuard::set("USERPROFILE", temp.path().to_str().unwrap());
         let _api_base = EnvVarGuard::set("API_BASE", "https://enterprise.example");
-        let changed =
-            persist_install_api_base_config(&test_binary_path(&install_dir), true).unwrap();
+
+        let changed = persist_install_config(&test_binary_path(&install_dir), true).unwrap();
         assert!(!changed);
         assert!(!temp.path().join(".git-ai").join("config.json").exists());
+    }
+
+    #[test]
+    #[serial]
+    fn first_install_sets_all_fields_with_both_functions() {
+        let temp = tempdir().unwrap();
+        let install_dir = temp.path().join("bin");
+        fs::create_dir_all(&install_dir).unwrap();
+        fs::write(test_binary_path(&install_dir), "").unwrap();
+
+        let expected_git_path = if cfg!(windows) {
+            r"C:\Program Files\Git\bin\git.exe"
+        } else {
+            "/opt/custom/bin/git"
+        };
+        write_install_git_marker(&install_dir, expected_git_path);
+
+        let _home = EnvVarGuard::set("HOME", temp.path().to_str().unwrap());
+        #[cfg(windows)]
+        let _userprofile = EnvVarGuard::set("USERPROFILE", temp.path().to_str().unwrap());
+        let _api_base = EnvVarGuard::set("API_BASE", "https://enterprise.example");
+
+        // Simulates the install flow: async_mode first, then persist_install_config
+        set_async_mode_for_first_install(false).unwrap();
+        let changed = persist_install_config(&test_binary_path(&install_dir), false).unwrap();
+        assert!(changed);
+
+        let config = crate::config::load_file_config_public().unwrap();
+        assert_eq!(
+            config.api_base_url.as_deref(),
+            Some("https://enterprise.example")
+        );
+        assert_eq!(config.git_path.as_deref(), Some(expected_git_path));
+        let async_mode = config
+            .feature_flags
+            .as_ref()
+            .and_then(|f| f.get("async_mode"))
+            .and_then(|v| v.as_bool());
+        assert_eq!(async_mode, Some(true));
+    }
+
+    #[test]
+    #[serial]
+    fn first_install_without_api_base() {
+        let temp = tempdir().unwrap();
+        let install_dir = temp.path().join("bin");
+        fs::create_dir_all(&install_dir).unwrap();
+        fs::write(test_binary_path(&install_dir), "").unwrap();
+
+        let expected_git_path = if cfg!(windows) {
+            r"C:\Program Files\Git\bin\git.exe"
+        } else {
+            "/opt/custom/bin/git"
+        };
+        write_install_git_marker(&install_dir, expected_git_path);
+
+        let _home = EnvVarGuard::set("HOME", temp.path().to_str().unwrap());
+        #[cfg(windows)]
+        let _userprofile = EnvVarGuard::set("USERPROFILE", temp.path().to_str().unwrap());
+        let _api_base = EnvVarGuard::remove("API_BASE");
+
+        set_async_mode_for_first_install(false).unwrap();
+        let changed = persist_install_config(&test_binary_path(&install_dir), false).unwrap();
+        assert!(changed);
+
+        let config = crate::config::load_file_config_public().unwrap();
+        assert_eq!(config.api_base_url, None);
+        assert_eq!(config.git_path.as_deref(), Some(expected_git_path));
+        let async_mode = config
+            .feature_flags
+            .as_ref()
+            .and_then(|f| f.get("async_mode"))
+            .and_then(|v| v.as_bool());
+        assert_eq!(async_mode, Some(true));
+    }
+
+    #[test]
+    #[serial]
+    fn persist_install_config_upgrade_preserves_existing_feature_flags() {
+        let temp = tempdir().unwrap();
+        let install_dir = temp.path().join("bin");
+        fs::create_dir_all(&install_dir).unwrap();
+        fs::write(test_binary_path(&install_dir), "").unwrap();
+
+        let _home = EnvVarGuard::set("HOME", temp.path().to_str().unwrap());
+        #[cfg(windows)]
+        let _userprofile = EnvVarGuard::set("USERPROFILE", temp.path().to_str().unwrap());
+        let _api_base = EnvVarGuard::set("API_BASE", "https://usegitai.com");
+
+        // Pre-existing config with custom feature flags
+        crate::config::save_file_config(&crate::config::FileConfig {
+            git_path: Some("/usr/bin/git".to_string()),
+            api_base_url: Some("https://usegitai.com".to_string()),
+            feature_flags: Some(serde_json::json!({
+                "async_mode": true,
+                "custom_flag": "hello"
+            })),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let changed = persist_install_config(&test_binary_path(&install_dir), false).unwrap();
+        // Nothing changed — api_base_url same, git_path present, not first install
+        assert!(!changed);
+
+        let config = crate::config::load_file_config_public().unwrap();
+        let flags = config.feature_flags.unwrap();
+        assert_eq!(
+            flags.get("async_mode").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            flags.get("custom_flag").and_then(|v| v.as_str()),
+            Some("hello")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn set_async_mode_does_not_overwrite_existing_config() {
+        let temp = tempdir().unwrap();
+
+        let _home = EnvVarGuard::set("HOME", temp.path().to_str().unwrap());
+        #[cfg(windows)]
+        let _userprofile = EnvVarGuard::set("USERPROFILE", temp.path().to_str().unwrap());
+
+        // User explicitly disabled async_mode (config already exists)
+        crate::config::save_file_config(&crate::config::FileConfig {
+            feature_flags: Some(serde_json::json!({
+                "async_mode": false
+            })),
+            ..Default::default()
+        })
+        .unwrap();
+
+        // set_async_mode_for_first_install should be a no-op since config exists
+        set_async_mode_for_first_install(false).unwrap();
+
+        // async_mode must still be false — user's choice is respected
+        let config = crate::config::load_file_config_public().unwrap();
+        let async_mode = config
+            .feature_flags
+            .as_ref()
+            .and_then(|f| f.get("async_mode"))
+            .and_then(|v| v.as_bool());
+        assert_eq!(async_mode, Some(false));
+    }
+
+    #[test]
+    #[serial]
+    fn persist_install_config_updates_api_base_on_existing_config() {
+        let temp = tempdir().unwrap();
+        let install_dir = temp.path().join("bin");
+        fs::create_dir_all(&install_dir).unwrap();
+        fs::write(test_binary_path(&install_dir), "").unwrap();
+
+        let _home = EnvVarGuard::set("HOME", temp.path().to_str().unwrap());
+        #[cfg(windows)]
+        let _userprofile = EnvVarGuard::set("USERPROFILE", temp.path().to_str().unwrap());
+
+        // Existing config with old api_base_url
+        crate::config::save_file_config(&crate::config::FileConfig {
+            git_path: Some("/usr/bin/git".to_string()),
+            api_base_url: Some("https://old-server.example".to_string()),
+            feature_flags: Some(serde_json::json!({
+                "async_mode": true
+            })),
+            ..Default::default()
+        })
+        .unwrap();
+
+        // Re-install with new API_BASE
+        let _api_base = EnvVarGuard::set("API_BASE", "https://new-server.example");
+
+        let changed = persist_install_config(&test_binary_path(&install_dir), false).unwrap();
+        assert!(changed);
+
+        let config = crate::config::load_file_config_public().unwrap();
+        assert_eq!(
+            config.api_base_url.as_deref(),
+            Some("https://new-server.example")
+        );
+        // Everything else preserved
+        assert_eq!(config.git_path.as_deref(), Some("/usr/bin/git"));
+        let async_mode = config
+            .feature_flags
+            .as_ref()
+            .and_then(|f| f.get("async_mode"))
+            .and_then(|v| v.as_bool());
+        assert_eq!(async_mode, Some(true));
     }
 
     #[cfg(windows)]
