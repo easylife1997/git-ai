@@ -1,0 +1,12 @@
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.5",
+  "base_commit_sha": "18b442787c50e84897218ee4c6243756c356a17b",
+  "prompts": {},
+  "humans": {
+    "h_0c5373a3b4f3f3": {
+      "author": "xiaozhi"
+    }
+  }
+}
