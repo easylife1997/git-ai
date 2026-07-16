@@ -1,0 +1,39 @@
+README.md
+  e10887349d0eb27e 3-4,12-13,307,339-406,414
+docs/token用量上报功能.md
+  6bc15a7a76b7d267 433-446,448,454,458-461,463,469,474-501
+  s_6bc15a7a76b7d2::t_ba48faf1f694d6 353-370,372-431
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.5",
+  "base_commit_sha": "41fa71c726c122abd2e6c6a48fc5943f90aee577",
+  "prompts": {
+    "6bc15a7a76b7d267": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7bb06c31-1e04-43ee-8cea-4b47f8d12784",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "xiaozhi",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 49,
+      "overriden_lines": 0
+    },
+    "e10887349d0eb27e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "79e307f6-f0f7-4942-abe8-d03b7934d909",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "xiaozhi",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 74,
+      "overriden_lines": 0
+    }
+  }
+}
