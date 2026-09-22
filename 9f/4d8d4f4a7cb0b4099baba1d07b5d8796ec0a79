@@ -1,0 +1,24 @@
+Cargo.toml
+  h_9a9e5382e93d34 3
+install-local.ps1
+  h_9a9e5382e93d34 86-116,195,197-199,212,250,260,263,266-270,272-311,370,373,375-376,378,410
+install-local.sh
+  h_9a9e5382e93d34 30-60,169,173-260,263-267,273-276
+install.ps1
+  h_9a9e5382e93d34 209,221-251,429,432,483,486,496,499,508,541,559,625,629-630,633-639,641,644-651,653-674,676-677
+install.sh
+  h_9a9e5382e93d34 55,67-97,381,386-472,475-479,485-488
+src/commands/uninstall.rs
+  h_9a9e5382e93d34 125,138-139
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "9f4d8d4f4a7cb0b4099baba1d07b5d8796ec0a79",
+  "prompts": {},
+  "humans": {
+    "h_9a9e5382e93d34": {
+      "author": "DN7374 <DN7374@jsyyds.com>"
+    }
+  }
+}
