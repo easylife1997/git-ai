@@ -1,4 +1,5 @@
 use super::config::TrackerConfig;
+use super::log::ReportOutcome;
 use crate::http;
 use serde_json::{Value, json};
 use std::process::Command;
@@ -12,7 +13,7 @@ pub fn upload_commit(
     config: &TrackerConfig,
     remote: &str,
     branch: &str,
-) -> Result<(), String> {
+) -> Result<ReportOutcome, String> {
     let commit_info = gather_commit_info(repo_path, commit_sha)?;
     let repo_url = get_remote_url(repo_path, remote).unwrap_or_else(|| repo_path.to_string());
     let git_ai_raw = get_git_ai_stats(repo_path, commit_sha);
@@ -71,15 +72,67 @@ pub fn upload_commit(
 
     let response = http::send_with_body(request, &payload_str)?;
 
-    if response.status_code >= 200 && response.status_code < 300 {
-        println!("[git-ai tracker] uploaded {}", &commit_sha[..8]);
-        Ok(())
-    } else {
-        Err(format!(
-            "tracker upload failed: HTTP {}",
-            response.status_code
-        ))
+    let mut outcome = parse_stats_response(
+        response.as_str().unwrap_or_default(),
+        ReportOutcome::from_http_status(response.status_code),
+    );
+    if outcome.message.is_none() {
+        outcome.message = Some(format!("HTTP {}，响应未确认入库", response.status_code));
     }
+    if outcome.saved {
+        println!(
+            "[{} tracker] saved {}",
+            crate::config::PRODUCT_NAME,
+            &commit_sha[..8]
+        );
+    }
+    // Preserve the HTTP status even for a rejection; callers retain failed
+    // reports in the retry queue rather than advancing reported markers.
+    Ok(outcome)
+}
+
+/// Extract the per-commit status the server assigned to our upload.
+///
+/// Response shape (see `docs/easylife-ai doctor.md`):
+/// `{"code":200,"data":{"success":true,"inserted":1,"duplicated":0,"failed":0,
+///   "results":[{"commitSha":"...","recordId":612,"status":"inserted"}]}}`
+///
+/// `status` is `inserted` (new row), `duplicated` (already present) or
+/// `failed` (rejected -- `recordId` is null).
+fn parse_stats_response(body: &str, mut outcome: ReportOutcome) -> ReportOutcome {
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return outcome;
+    };
+    let Some(data) = value.get("data") else {
+        return outcome;
+    };
+
+    outcome.server_success = data
+        .get("success")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    outcome.inserted = data.get("inserted").and_then(Value::as_i64);
+    outcome.duplicated = data.get("duplicated").and_then(Value::as_i64);
+    outcome.failed = data.get("failed").and_then(Value::as_i64);
+
+    if let Some(result) = data
+        .get("results")
+        .and_then(Value::as_array)
+        .and_then(|results| results.first())
+    {
+        outcome.record_id = result.get("recordId").and_then(Value::as_i64);
+        if let Some(status) = result.get("status").and_then(Value::as_str) {
+            outcome.message = Some(status.to_string());
+        }
+    }
+
+    // `saved` means this request inserted a new row, not merely that the same
+    // record already existed. Keep duplicates distinct in the log counters.
+    outcome.saved = outcome.message.as_deref() == Some("inserted")
+        && outcome.record_id.is_some()
+        && outcome.server_success;
+
+    outcome
 }
 
 struct CommitMeta {
@@ -287,6 +340,28 @@ fn get_git_ai_version() -> String {
     match output {
         Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_string(),
         _ => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod outcome_tests {
+    use super::*;
+
+    #[test]
+    fn inserted_duplicate_and_failure_are_distinct() {
+        for (status, saved, accepted) in [
+            ("inserted", true, true),
+            ("duplicated", false, true),
+            ("failed", false, false),
+        ] {
+            let body = serde_json::json!({"data":{"success":true,"results":[{"status":status,"recordId":42}]}});
+            let result =
+                parse_stats_response(&body.to_string(), ReportOutcome::from_http_status(200));
+            assert_eq!(result.saved, saved);
+            assert_eq!(result.accepted(), accepted);
+        }
+        let malformed = parse_stats_response("not json", ReportOutcome::from_http_status(200));
+        assert!(!malformed.accepted());
     }
 }
 

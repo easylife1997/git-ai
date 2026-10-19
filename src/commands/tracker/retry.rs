@@ -84,16 +84,31 @@ pub fn process_retries(config: &TrackerConfig) -> Result<(), String> {
                 &entry.remote,
                 &entry.branch,
             ) {
-                Ok(()) => {
-                    let _ = notes::mark_reported(&entry.repo_path, &entry.commit_sha);
+                Ok(outcome) => {
+                    if outcome.accepted() {
+                        let _ = notes::mark_reported(&entry.repo_path, &entry.commit_sha);
+                    }
+                    let status = if outcome.saved {
+                        super::log::LogStatus::RetryOk
+                    } else {
+                        super::log::LogStatus::NotSaved
+                    };
                     super::log::append_log(
-                        super::log::LogStatus::RetryOk,
+                        status,
+                        super::log::LogKind::Code,
                         &entry.commit_sha,
                         &entry.remote,
                         &entry.branch,
                         &entry.repo_path,
                         None,
+                        Some(&outcome),
                     );
+                    if !outcome.accepted() {
+                        entry.retry_count += 1;
+                        if entry.retry_count < MAX_RETRIES {
+                            remaining_entries.push(entry);
+                        }
+                    }
                 }
                 Err(_) => {
                     entry.retry_count += 1;

@@ -195,23 +195,33 @@ fn collect_tool_uses(parts: &[PartData]) -> Vec<ToolUseEntry> {
 // SQLite loading
 // ---------------------------------------------------------------------------
 
-/// Find the most recently updated session id (manual-invocation fallback).
+/// Newest `(id, time_updated)` in `table`, or `None` when the table is missing
+/// or empty. `table` is always a compile-time constant, never user input.
+fn newest_session_in(conn: &Connection, table: &str) -> Option<(String, i64)> {
+    let sql = format!(
+        "SELECT id, time_updated FROM {} ORDER BY time_updated DESC LIMIT 1",
+        table
+    );
+    let mut stmt = conn.prepare(&sql).ok()?;
+    let mut rows = stmt.query([]).ok()?;
+    let row = rows.next().ok()??;
+    Some((
+        row.get::<_, String>(0).ok()?,
+        row.get::<_, i64>(1).unwrap_or(0),
+    ))
+}
+
+/// Find the most recently updated session id (manual-invocation fallback),
+/// across both the 1.x (`session`) and 2.x (`session_v2`) tables.
 fn latest_session_id(conn: &Connection) -> Result<Option<String>, String> {
-    let mut stmt = conn
-        .prepare("SELECT id FROM session ORDER BY time_updated DESC LIMIT 1")
-        .map_err(|e| format!("prepare latest session query failed: {}", e))?;
-
-    let mut rows = stmt
-        .query([])
-        .map_err(|e| format!("latest session query failed: {}", e))?;
-
-    match rows.next().map_err(|e| format!("row read failed: {}", e))? {
-        Some(row) => Ok(Some(
-            row.get::<_, String>(0)
-                .map_err(|e| format!("id read failed: {}", e))?,
-        )),
-        None => Ok(None),
-    }
+    let v1 = newest_session_in(conn, "session");
+    let v2 = newest_session_in(conn, "session_v2");
+    Ok(match (v1, v2) {
+        (Some(a), Some(b)) => Some(if b.1 >= a.1 { b.0 } else { a.0 }),
+        (Some(a), None) => Some(a.0),
+        (None, Some(b)) => Some(b.0),
+        (None, None) => None,
+    })
 }
 
 /// Load the session row. Returns None when the session does not exist.
@@ -311,10 +321,214 @@ struct TurnAccumulator {
     model: Option<String>,
 }
 
+// ---------------------------------------------------------------------------
+// OpenCode 2.x (`session_v2` / `session_message`)
+// ---------------------------------------------------------------------------
+//
+// 2.x keeps one JSON row per message in `session_message`, ordered by `seq`:
+//   user      {text}
+//   assistant {content:[text|reasoning|tool...], tokens:{input,output,reasoning,cache:{read,write}}, model:{id}}
+//   system / idle  (ignored)
+// A turn starts at a `user` row and owns every following `assistant` row until
+// the next `user` row.
+
+/// Extract the text of a V2 tool result: `state.content[].text`, falling back
+/// to `state.metadata.output`.
+fn v2_tool_result(state: &Value) -> Option<String> {
+    let from_content = state
+        .get("content")
+        .and_then(|c| c.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|i| i.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .filter(|s| !s.is_empty());
+    from_content
+        .or_else(|| {
+            state
+                .get("metadata")
+                .and_then(|m| m.get("output"))
+                .and_then(|o| o.as_str())
+                .map(|s| s.to_string())
+        })
+        .map(|s| truncate_str(&s, MAX_TOOL_RESULT_LEN))
+}
+
+/// Parse a session stored in the 2.x tables. Returns `Ok(None)` when the
+/// session is not present there (or the tables do not exist), so the caller
+/// can fall back to the 1.x layout.
+fn parse_turns_v2(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Option<Vec<TokenUsageData>>, String> {
+    let session: Option<(Option<String>, Option<String>)> = conn
+        .prepare("SELECT directory, model FROM session_v2 WHERE id = ? LIMIT 1")
+        .ok()
+        .and_then(|mut stmt| {
+            stmt.query_row([session_id], |r| Ok((r.get(0).ok(), r.get(1).ok())))
+                .ok()
+        });
+    let Some((directory, model_col)) = session else {
+        return Ok(None);
+    };
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT type, data FROM session_message WHERE session_id = ? \
+             AND type IN ('user','assistant') ORDER BY seq ASC",
+        )
+        .map_err(|e| format!("prepare session_message query failed: {}", e))?;
+    let mut rows = stmt
+        .query([session_id])
+        .map_err(|e| format!("session_message query failed: {}", e))?;
+
+    #[derive(Default)]
+    struct V2Turn {
+        user: String,
+        reply: String,
+        tools: Vec<Value>,
+        input: i64,
+        output: i64,
+        cache_read: i64,
+        cache_write: i64,
+        model: Option<String>,
+        assistants: usize,
+    }
+
+    let mut turns: Vec<V2Turn> = Vec::new();
+    while let Some(row) = rows.next().map_err(|e| format!("row read failed: {}", e))? {
+        let kind: String = row.get(0).map_err(|e| format!("type read failed: {}", e))?;
+        let text: String = row.get(1).map_err(|e| format!("data read failed: {}", e))?;
+        let Ok(data) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+
+        if kind == "user" {
+            turns.push(V2Turn {
+                user: data
+                    .get("text")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                ..Default::default()
+            });
+            continue;
+        }
+
+        // Assistant rows before any user row cannot be attributed to a turn.
+        let Some(turn) = turns.last_mut() else {
+            continue;
+        };
+        turn.assistants += 1;
+
+        if let Some(t) = data.get("tokens") {
+            let n = |v: Option<&Value>| v.and_then(|x| x.as_i64()).unwrap_or(0);
+            turn.input += n(t.get("input"));
+            // Reasoning is billed as output, matching the 1.x reader.
+            turn.output += n(t.get("output")) + n(t.get("reasoning"));
+            turn.cache_read += n(t.get("cache").and_then(|c| c.get("read")));
+            turn.cache_write += n(t.get("cache").and_then(|c| c.get("write")));
+        }
+        if let Some(id) = data
+            .get("model")
+            .and_then(|m| m.get("id"))
+            .and_then(|i| i.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            turn.model = Some(id.to_string());
+        }
+
+        let mut last_text = String::new();
+        if let Some(items) = data.get("content").and_then(|c| c.as_array()) {
+            for item in items {
+                match item.get("type").and_then(|t| t.as_str()) {
+                    Some("text") => {
+                        if let Some(t) = item.get("text").and_then(|t| t.as_str())
+                            && !t.is_empty()
+                        {
+                            last_text = t.to_string();
+                        }
+                    }
+                    Some("tool") => {
+                        let state = item.get("state").cloned().unwrap_or(Value::Null);
+                        turn.tools.push(serde_json::json!({
+                            "name": item.get("name").and_then(|n| n.as_str()).unwrap_or(""),
+                            "id": item.get("id").and_then(|n| n.as_str()).unwrap_or(""),
+                            "arguments": state.get("input").cloned().unwrap_or(Value::Null),
+                            "order": turn.tools.len() + 1,
+                            "result": v2_tool_result(&state),
+                        }));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // User-visible reply = text of the last assistant row that has any.
+        if !last_text.is_empty() {
+            turn.reply = last_text;
+        }
+    }
+
+    let session_model = model_col.as_deref().and_then(parse_model_column);
+    let repo_url = directory.as_deref().and_then(repo_url_from_directory);
+
+    let mut result = Vec::new();
+    for (pos, t) in turns.iter().enumerate() {
+        let total = t.input + t.output + t.cache_read + t.cache_write;
+        // Same rule as 1.x: a prompt that never reached the model is skipped,
+        // while `turn_index` keeps the pre-filter position.
+        if t.assistants == 0 && total == 0 {
+            continue;
+        }
+        let non_empty = |s: &str| (!s.is_empty()).then(|| s.to_string());
+        result.push(TokenUsageData {
+            session_id: session_id.to_string(),
+            turn_index: (pos + 1) as i64,
+            model: t
+                .model
+                .clone()
+                .or_else(|| session_model.clone())
+                .unwrap_or_else(|| "unknown".to_string()),
+            input_tokens: t.input,
+            output_tokens: t.output,
+            cache_read_tokens: t.cache_read,
+            cache_creation_tokens: t.cache_write,
+            total_tokens: total,
+            cost_usd: None,
+            repo_url: repo_url.clone(),
+            project_name: None,
+            user_prompts: non_empty(&t.user),
+            assistant_responses: non_empty(&t.reply),
+            tool_uses: if t.tools.is_empty() {
+                None
+            } else {
+                serde_json::to_string(&t.tools).ok()
+            },
+        });
+    }
+
+    tracing::debug!(
+        "report-token-usage: parsed {} turns from OpenCode 2.x session {}",
+        result.len(),
+        session_id
+    );
+    Ok(Some(result))
+}
+
 /// Parse all turns for a session out of the OpenCode database at `db_path`.
 fn parse_turns_from_db(db_path: &Path, session_id: &str) -> Result<Vec<TokenUsageData>, String> {
     let conn = OpenCodePreset::open_sqlite_readonly(db_path)
         .map_err(|e| format!("failed to open {}: {}", db_path.display(), e))?;
+
+    // OpenCode 2.x stores sessions in `session_v2` / `session_message` and no
+    // longer writes `message` / `part`. Prefer that layout when the session
+    // lives there; everything below is the unchanged 1.x path.
+    if let Some(turns) = parse_turns_v2(&conn, session_id)? {
+        return Ok(turns);
+    }
 
     let Some(session) = load_session(&conn, session_id)? else {
         return Ok(Vec::new());
@@ -961,5 +1175,199 @@ mod tests {
         let cut = truncate_str(&long, 5);
         assert!(cut.starts_with("xxxxx"));
         assert!(cut.ends_with("...(truncated)"));
+    }
+
+    // -- OpenCode 2.x layout -------------------------------------------------
+
+    fn add_v2_tables(conn: &Connection) {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE session_v2 (
+                id TEXT PRIMARY KEY,
+                directory TEXT,
+                model TEXT,
+                time_updated INTEGER NOT NULL
+            );
+            CREATE TABLE session_message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                type TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                data TEXT NOT NULL
+            );
+            "#,
+        )
+        .unwrap();
+    }
+
+    fn insert_v2_message(conn: &Connection, sid: &str, seq: i64, kind: &str, data: &str) {
+        conn.execute(
+            "INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) \
+             VALUES (?1, ?2, ?3, ?4, ?4, ?4, ?5)",
+            rusqlite::params![format!("msg_{}_{}", sid, seq), sid, kind, seq, data],
+        )
+        .unwrap();
+    }
+
+    /// Two turns; the first has two assistant rows (tool step + answer) whose
+    /// usage is summed, and an `idle` row that must be ignored.
+    #[test]
+    fn test_v2_turns_are_split_on_user_rows_and_summed() {
+        let (_dir, db_path) = setup_db();
+        let conn = Connection::open(&db_path).unwrap();
+        add_v2_tables(&conn);
+        conn.execute(
+            "INSERT INTO session_v2 (id, directory, model, time_updated) VALUES ('ses_v2', NULL, ?1, 1)",
+            [r#"{"id":"session-model","providerID":"anthropic"}"#],
+        )
+        .unwrap();
+
+        insert_v2_message(
+            &conn,
+            "ses_v2",
+            1,
+            "user",
+            r#"{"text":"run echo","files":[]}"#,
+        );
+        insert_v2_message(
+            &conn,
+            "ses_v2",
+            2,
+            "assistant",
+            r#"{"model":{"id":"claude-opus-4-8"},
+                "content":[{"type":"reasoning","text":"thinking"},
+                           {"type":"tool","id":"call_1","name":"bash",
+                            "state":{"status":"completed","input":{"command":"echo hi"},
+                                     "content":[{"type":"text","text":"hi"}]}}],
+                "tokens":{"input":10,"output":4,"reasoning":1,"cache":{"read":100,"write":20}}}"#,
+        );
+        insert_v2_message(
+            &conn,
+            "ses_v2",
+            3,
+            "assistant",
+            r#"{"model":{"id":"claude-opus-4-8"},
+                "content":[{"type":"text","text":"done"}],
+                "tokens":{"input":2,"output":6,"reasoning":0,"cache":{"read":5,"write":0}}}"#,
+        );
+        insert_v2_message(&conn, "ses_v2", 4, "idle", r#"{"outcome":"succeeded"}"#);
+        insert_v2_message(
+            &conn,
+            "ses_v2",
+            5,
+            "user",
+            r#"{"text":"second","files":[]}"#,
+        );
+        insert_v2_message(
+            &conn,
+            "ses_v2",
+            6,
+            "assistant",
+            r#"{"content":[{"type":"text","text":"ok"}],
+                "tokens":{"input":1,"output":1,"cache":{"read":0,"write":0}}}"#,
+        );
+        drop(conn);
+
+        let turns = parse_turns_from_db(&db_path, "ses_v2").unwrap();
+        assert_eq!(turns.len(), 2);
+
+        let t1 = &turns[0];
+        assert_eq!(t1.turn_index, 1);
+        assert_eq!(t1.model, "claude-opus-4-8");
+        assert_eq!(t1.input_tokens, 12);
+        assert_eq!(t1.output_tokens, 11); // 4 + 1 reasoning + 6
+        assert_eq!(t1.cache_read_tokens, 105);
+        assert_eq!(t1.cache_creation_tokens, 20);
+        assert_eq!(t1.total_tokens, 12 + 11 + 105 + 20);
+        assert_eq!(t1.user_prompts.as_deref(), Some("run echo"));
+        assert_eq!(t1.assistant_responses.as_deref(), Some("done"));
+
+        let tools: Value = serde_json::from_str(t1.tool_uses.as_deref().unwrap()).unwrap();
+        assert_eq!(tools[0]["name"], "bash");
+        assert_eq!(tools[0]["id"], "call_1");
+        assert_eq!(tools[0]["arguments"]["command"], "echo hi");
+        assert_eq!(tools[0]["result"], "hi");
+
+        // No per-row model on turn 2: falls back to the session model.
+        assert_eq!(turns[1].turn_index, 2);
+        assert_eq!(turns[1].model, "session-model");
+    }
+
+    /// A V2 prompt with no assistant row yet (in flight / aborted before the
+    /// model answered) is skipped, but later turns keep their position.
+    #[test]
+    fn test_v2_prompt_without_assistant_is_skipped() {
+        let (_dir, db_path) = setup_db();
+        let conn = Connection::open(&db_path).unwrap();
+        add_v2_tables(&conn);
+        conn.execute(
+            "INSERT INTO session_v2 (id, directory, model, time_updated) VALUES ('ses_v2', NULL, NULL, 1)",
+            [],
+        )
+        .unwrap();
+        insert_v2_message(&conn, "ses_v2", 1, "user", r#"{"text":"lost"}"#);
+        insert_v2_message(&conn, "ses_v2", 2, "user", r#"{"text":"kept"}"#);
+        insert_v2_message(
+            &conn,
+            "ses_v2",
+            3,
+            "assistant",
+            r#"{"content":[{"type":"text","text":"hi"}],"tokens":{"input":3,"output":2,"cache":{"read":0,"write":0}}}"#,
+        );
+        drop(conn);
+
+        let turns = parse_turns_from_db(&db_path, "ses_v2").unwrap();
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].turn_index, 2);
+        assert_eq!(turns[0].user_prompts.as_deref(), Some("kept"));
+    }
+
+    /// A session only present in the 1.x tables still goes through the 1.x path
+    /// when the 2.x tables exist (shared DB after a 2.x launch).
+    #[test]
+    fn test_v1_session_still_parsed_when_v2_tables_exist() {
+        let (_dir, db_path) = setup_db();
+        let conn = Connection::open(&db_path).unwrap();
+        add_v2_tables(&conn);
+        insert_session(&conn, "ses_v1", None, Some("m"), 1000);
+        insert_message(&conn, "msg_u", "ses_v1", 1, r#"{"role":"user"}"#);
+        insert_message(
+            &conn,
+            "msg_a",
+            "ses_v1",
+            2,
+            r#"{"role":"assistant","parentID":"msg_u","modelID":"m","tokens":{"input":7,"output":3,"reasoning":0,"cache":{"read":0,"write":0}}}"#,
+        );
+        drop(conn);
+
+        let turns = parse_turns_from_db(&db_path, "ses_v1").unwrap();
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].input_tokens, 7);
+    }
+
+    /// Manual fallback picks the newest session across both layouts.
+    #[test]
+    fn test_latest_session_id_spans_v1_and_v2() {
+        let (_dir, db_path) = setup_db();
+        let conn = Connection::open(&db_path).unwrap();
+        add_v2_tables(&conn);
+        insert_session(&conn, "ses_old_v1", None, None, 100);
+        conn.execute(
+            "INSERT INTO session_v2 (id, directory, model, time_updated) VALUES ('ses_new_v2', NULL, NULL, 200)",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            latest_session_id(&conn).unwrap().as_deref(),
+            Some("ses_new_v2")
+        );
+
+        insert_session(&conn, "ses_newer_v1", None, None, 300);
+        assert_eq!(
+            latest_session_id(&conn).unwrap().as_deref(),
+            Some("ses_newer_v1")
+        );
     }
 }

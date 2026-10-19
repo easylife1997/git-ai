@@ -66,11 +66,13 @@ pub fn report_pushed_commits(
             {
                 log::append_log(
                     log::LogStatus::Skipped,
+                    log::LogKind::Code,
                     &commit_sha,
                     remote,
                     branch,
                     &work_tree,
                     Some(&reason),
+                    None,
                 );
                 continue;
             }
@@ -91,26 +93,42 @@ pub fn report_pushed_commits(
                 remote,
                 branch,
             ) {
-                Ok(()) => {
-                    let _ = notes::mark_reported(&work_tree, &commit_sha);
+                Ok(outcome) => {
+                    if outcome.accepted() {
+                        let _ = notes::mark_reported(&work_tree, &commit_sha);
+                    } else {
+                        let _ =
+                            retry::save_to_queue(&work_tree, &commit_sha, diff_gz, remote, branch);
+                    }
+                    // A 2xx response is not proof of storage -- the server also
+                    // returns 200 when it rejects the row.  Record which happened.
+                    let status = if outcome.saved {
+                        log::LogStatus::Uploaded
+                    } else {
+                        log::LogStatus::NotSaved
+                    };
                     log::append_log(
-                        log::LogStatus::Uploaded,
+                        status,
+                        log::LogKind::Code,
                         &commit_sha,
                         remote,
                         branch,
                         &work_tree,
                         None,
+                        Some(&outcome),
                     );
                 }
                 Err(e) => {
                     tracing::debug!("tracker upload failed {}: {}", &commit_sha, e);
                     log::append_log(
                         log::LogStatus::Failed,
+                        log::LogKind::Code,
                         &commit_sha,
                         remote,
                         branch,
                         &work_tree,
                         Some(&e),
+                        None,
                     );
                     let _ = retry::save_to_queue(&work_tree, &commit_sha, diff_gz, remote, branch);
                 }

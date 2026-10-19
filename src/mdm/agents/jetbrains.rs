@@ -149,6 +149,14 @@ impl HookInstaller for JetBrainsInstaller {
         false
     }
 
+    fn check_extras(&self, _params: &HookInstallerParams) -> Result<bool, GitAiError> {
+        let installations = Self::get_installations();
+        Ok(!installations.is_empty()
+            && installations
+                .iter()
+                .all(|ide| ide.is_compatible() && is_plugin_installed(ide)))
+    }
+
     fn check_hooks(&self, _params: &HookInstallerParams) -> Result<HookCheckResult, GitAiError> {
         let installations = Self::get_installations();
 

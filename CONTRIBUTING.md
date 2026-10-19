@@ -31,13 +31,17 @@ Thank you for your interest in contributing to `git-ai`. This is a cool moment f
 
 ### Using a development build locally
 
-It's often helpful to point your `git-ai` to a development build. The dev script builds the binary and installs it to `~/.git-ai/bin/git-ai`, replacing the production binary so you can test changes with real git repositories.
+It's often helpful to point your `git-ai` to a development build. The dev script builds the binary and installs it to `~/.easylife-ai/bin/easylife-ai`, replacing the production binary so you can test changes with real git repositories.
 
 ```bash
 task dev
 ```
 
-If `~/.git-ai` isn't set up yet, the script will run the installer automatically first.
+If `~/.easylife-ai` isn't set up yet, the script will run the installer automatically first.
+
+The script also writes `disable_auto_updates=true` and `disable_version_checks=true` into `~/.easylife-ai/config.json`. Without this, the daemon's auto-updater replaces the dev build with the published release within the check interval, because the release carries a higher semver. A replaced build reports `Unknown git-ai command: <subcommand>` for every subcommand added since that release, and — because `install` wipes and rewrites `~/.easylife-ai/skills/` — it also deletes any skill that release does not embed. Re-run `task dev` if you see either symptom.
+
+This guards the *automatic* path only: running `easylife-ai upgrade` by hand still fetches and installs the release.
 
 ## Contributing Changes
 

@@ -301,6 +301,67 @@ fn maybe_teardown_async_mode(dry_run: bool) {
     }
 }
 
+/// Bring a machine that once ran the `~/.git-ai` install onto the current one:
+/// stop the orphaned legacy daemon and repoint the hooks it left behind.
+/// Never touches anything when there is no legacy directory, and never runs
+/// inside the test harness.
+fn maybe_migrate_legacy_installation(binary_path: &Path, dry_run: bool) {
+    if std::env::var_os("GIT_AI_TEST_DB_PATH").is_some()
+        || std::env::var_os("GITAI_TEST_DB_PATH").is_some()
+    {
+        return;
+    }
+
+    let home = crate::mdm::utils::home_dir();
+    let legacy = crate::commands::legacy_migration::legacy_dir(&home);
+    if !legacy.exists() {
+        return;
+    }
+
+    if dry_run {
+        println!(
+            "\x1b[1;33m⚠ 检测到旧版安装目录\x1b[0m {}（dry-run，不修改；执行安装将停止旧后台服务并统一 hook 指向）",
+            legacy.display()
+        );
+        return;
+    }
+
+    let report = crate::commands::legacy_migration::migrate(&home, binary_path, false);
+    if !report.daemon_notes.is_empty() || report.has_changes() || !report.errors.is_empty() {
+        println!("\n\x1b[1m旧版安装迁移\x1b[0m（{}）", legacy.display());
+        crate::commands::legacy_migration::print_report(&report);
+    }
+
+    // The legacy runtime directory is kept, not deleted: it holds history the
+    // user may still want. Removal is an explicit, separate action.
+    println!(
+        "\x1b[1;33m提示：旧目录 {} 保留未删除，确认无影响后可手动移除\x1b[0m",
+        legacy.display()
+    );
+}
+
+/// Show the token reporting switch in the config file.
+///
+/// A missing `token_report` key already means "report" when the config is read,
+/// so this changes no behaviour — it only makes the switch discoverable instead
+/// of invisible. Deliberately does not run under a test DB path, and never
+/// overwrites a value the user set.
+fn maybe_expose_token_report_switch(dry_run: bool) {
+    if dry_run
+        || std::env::var_os("GIT_AI_TEST_DB_PATH").is_some()
+        || std::env::var_os("GITAI_TEST_DB_PATH").is_some()
+    {
+        return;
+    }
+    match crate::commands::tracker::config::ensure_token_report_field() {
+        Ok(true) => println!(
+            "\x1b[1;32m✓\x1b[0m 已在 tracker-config.json 中显式写出 token_report=true（可改为 false 关闭 token 上报）"
+        ),
+        Ok(false) => {}
+        Err(e) => println!("\x1b[1;33m⚠ 未能写入 token_report 字段：{}\x1b[0m", e),
+    }
+}
+
 fn maybe_ensure_daemon(dry_run: bool) {
     if dry_run {
         return;
@@ -364,6 +425,14 @@ pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
     // Get absolute path to the current binary
     let binary_path = get_current_binary_path()?;
     persist_install_api_base_config(&binary_path, dry_run)?;
+
+    // Repoint anything left over from a pre-rename (~/.git-ai) install before
+    // the installers run, so their "already installed" detection sees the
+    // correct binary instead of re-adding a second entry next to the stale one.
+    maybe_migrate_legacy_installation(&binary_path, dry_run);
+
+    maybe_expose_token_report_switch(dry_run);
+
     let params = HookInstallerParams { binary_path };
 
     // Run async operations with smol and convert result

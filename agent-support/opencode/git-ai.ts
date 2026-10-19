@@ -167,8 +167,29 @@ const extractFilePaths = (args: unknown, cwd?: string): string[] => {
   return [...normalizedPaths]
 }
 
-export const GitAiPlugin: Plugin = async (ctx) => {
+/**
+ * Tool call metadata, normalized across OpenCode versions.
+ *
+ * V1 passes `{tool, callID, sessionID, cwd}` plus a separate args object.
+ * V2 passes `{tool, id, sessionID, input}` through `ctx.tool.hook`. Both are
+ * funnelled into this shape so the checkpoint logic stays version-agnostic.
+ */
+type ToolCallInfo = {
+  tool: string
+  callID: string
+  sessionID: string
+  cwd?: string
+  workdir?: string
+}
 
+/**
+ * Shared setup for both entrypoints (OpenCode V1 and V2).
+ *
+ * Keeping the work here means the V1 and V2 entrypoints cannot drift apart:
+ * they only adapt their own hook signature and delegate. Returns `null` when
+ * git-ai is not installed, which makes both entrypoints no-ops.
+ */
+const createGitAiHandlers = async () => {
   // Check if git-ai is installed
   let gitAiInstalled = false
   try {
@@ -179,7 +200,7 @@ export const GitAiPlugin: Plugin = async (ctx) => {
   }
 
   if (!gitAiInstalled) {
-    return {}
+    return null
   }
 
   // Track pending calls by callID so we can reference them in the after hook
@@ -234,128 +255,156 @@ export const GitAiPlugin: Plugin = async (ctx) => {
     return undefined
   }
 
+  /**
+   * Shared pre-tool checkpoint. `cwd`/`workdir` come from the raw tool args so
+   * this works for both hook shapes.
+   */
+  const handleToolBefore = async (call: ToolCallInfo, toolInput: unknown): Promise<void> => {
+    const toolCwd = extractToolCwd(call.cwd ?? call.workdir, toolInput as Record<string, unknown> | undefined)
+
+    if (!isEditTool(call.tool) && !isBashTool(call.tool)) {
+      return
+    }
+
+    // File-edit tools carry file paths; bash tools do not, so resolve from cwd.
+    const filePaths = isEditTool(call.tool) ? extractFilePaths(toolInput, toolCwd) : []
+    const repoDir = await resolveRepoDir(filePaths, toolCwd)
+    if (!repoDir) {
+      return
+    }
+
+    pendingCalls.set(call.callID, { repoDir, sessionID: call.sessionID, toolInput })
+
+    try {
+      const hookInput = JSON.stringify({
+        hook_event_name: "PreToolUse",
+        session_id: call.sessionID,
+        tool_use_id: call.callID,
+        cwd: repoDir,
+        tool_name: call.tool,
+        tool_input: toolInput,
+      })
+      await runCommand(GIT_AI_BIN, ["checkpoint", "opencode", "--hook-input", "stdin"], hookInput)
+    } catch (error) {
+      console.error("[git-ai] Failed to create human checkpoint:", String(error))
+    }
+  }
+
+  /** Shared post-tool checkpoint, paired with `handleToolBefore` by call id. */
+  const handleToolAfter = async (call: ToolCallInfo): Promise<void> => {
+    if (!isEditTool(call.tool) && !isBashTool(call.tool)) {
+      return
+    }
+
+    const callInfo = pendingCalls.get(call.callID)
+    pendingCalls.delete(call.callID)
+
+    if (!callInfo) {
+      return
+    }
+
+    try {
+      const hookInput = JSON.stringify({
+        hook_event_name: "PostToolUse",
+        session_id: callInfo.sessionID,
+        tool_use_id: call.callID,
+        cwd: callInfo.repoDir,
+        tool_name: call.tool,
+        tool_input: callInfo.toolInput,
+      })
+      await runCommand(GIT_AI_BIN, ["checkpoint", "opencode", "--hook-input", "stdin"], hookInput)
+    } catch (error) {
+      console.error("[git-ai] Failed to create AI checkpoint:", String(error))
+    }
+  }
+
+  /**
+   * Report token usage + prompts for the finished turn.
+   *
+   * A prompt loop settling is OpenCode's equivalent of the Claude Code / Codex
+   * `Stop` hook. The plugin must pass the session id explicitly: unlike Claude
+   * (stdin transcript_path) and Codex (filename ordering), OpenCode exposes no
+   * reliable way for the CLI to infer which session just finished.
+   */
+  const reportTokenUsage = async (sessionID: string | undefined): Promise<void> => {
+    if (!sessionID) {
+      console.warn("[git-ai] session event did not include sessionID")
+      return
+    }
+
+    // OpenCode publishes the settling event while the final message/part may
+    // still be flushing to storage. Delay and retry so a completed turn is not
+    // silently missed by the external reporter.
+    const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+    const delays = [1000, 1000, 1500]
+    for (let attempt = 0; attempt < delays.length; attempt += 1) {
+      await wait(delays[attempt])
+      try {
+        await runCommand(GIT_AI_BIN, ["report-token-usage", "opencode", "--session-id", sessionID])
+        console.info(`[git-ai] Reported OpenCode token usage for ${sessionID}`)
+        return
+      } catch (error) {
+        console.warn(
+          `[git-ai] OpenCode token report attempt ${attempt + 1}/${delays.length} failed for ${sessionID}: ${String(error)}`,
+        )
+      }
+    }
+
+    console.error(`[git-ai] Failed to report OpenCode token usage after retries: ${sessionID}`)
+  }
+
+  return { handleToolBefore, handleToolAfter, reportTokenUsage }
+}
+
+/**
+ * OpenCode V1 entrypoint.
+ *
+ * V1 loads a named export whose factory returns an object of hooks. The
+ * `event` hook receives `{type, properties}`.
+ */
+
+export const GitAiPlugin: Plugin = async (_ctx) => {
+  const handlers = await createGitAiHandlers()
+  if (!handlers) {
+    return {}
+  }
+
   return {
     "tool.execute.before": async (input, output) => {
-      const toolInput = output.args
-      const toolCwd = extractToolCwd((input as { cwd?: unknown }).cwd ?? (input as { workdir?: unknown }).workdir, output.args)
-
-      if (isEditTool(input.tool)) {
-        // File-edit tools: extract file paths for rich repo resolution
-        const filePaths = extractFilePaths(toolInput, toolCwd)
-        const repoDir = await resolveRepoDir(filePaths, toolCwd)
-        if (!repoDir) {
-          return
-        }
-
-        pendingCalls.set(input.callID, { repoDir, sessionID: input.sessionID, toolInput })
-
-        try {
-          const hookInput = JSON.stringify({
-            hook_event_name: "PreToolUse",
-            session_id: input.sessionID,
-            tool_use_id: input.callID,
-            cwd: repoDir,
-            tool_name: input.tool,
-            tool_input: toolInput,
-          })
-          await runCommand(GIT_AI_BIN, ["checkpoint", "opencode", "--hook-input", "stdin"], hookInput)
-        } catch (error) {
-          console.error("[git-ai] Failed to create human checkpoint:", String(error))
-        }
-
-      } else if (isBashTool(input.tool)) {
-        // Bash tool: no file paths in input; resolve repo from workdir or cwd
-        const repoDir = await resolveRepoDir([], toolCwd)
-        if (!repoDir) {
-          return
-        }
-
-        pendingCalls.set(input.callID, { repoDir, sessionID: input.sessionID, toolInput })
-
-        try {
-          const hookInput = JSON.stringify({
-            hook_event_name: "PreToolUse",
-            session_id: input.sessionID,
-            tool_use_id: input.callID,
-            cwd: repoDir,
-            tool_name: input.tool,
-            tool_input: toolInput,
-          })
-          await runCommand(GIT_AI_BIN, ["checkpoint", "opencode", "--hook-input", "stdin"], hookInput)
-        } catch (error) {
-          console.error("[git-ai] Failed to create human checkpoint:", String(error))
-        }
-      }
+      await handlers.handleToolBefore(
+        {
+          tool: input.tool,
+          callID: input.callID,
+          sessionID: input.sessionID,
+          cwd: (input as { cwd?: string }).cwd ?? (input as { workdir?: string }).workdir,
+        },
+        output.args,
+      )
     },
 
     "tool.execute.after": async (input, _output) => {
-      if (!isEditTool(input.tool) && !isBashTool(input.tool)) {
-        return
-      }
-
-      const callInfo = pendingCalls.get(input.callID)
-      pendingCalls.delete(input.callID)
-
-      if (!callInfo) {
-        return
-      }
-
-      const { repoDir, sessionID, toolInput } = callInfo
-
-      try {
-        const hookInput = JSON.stringify({
-          hook_event_name: "PostToolUse",
-          session_id: sessionID,
-          tool_use_id: input.callID,
-          cwd: repoDir,
-          tool_name: input.tool,
-          tool_input: toolInput,
-        })
-        await runCommand(GIT_AI_BIN, ["checkpoint", "opencode", "--hook-input", "stdin"], hookInput)
-      } catch (error) {
-        console.error("[git-ai] Failed to create AI checkpoint:", String(error))
-      }
+      await handlers.handleToolAfter({
+        tool: input.tool,
+        callID: input.callID,
+        sessionID: input.sessionID,
+      })
     },
 
-    /**
-     * Report token usage + prompts for the finished turn.
-     *
-     * `session.idle` fires whenever a prompt loop settles, including on abort
-     * and error paths, which makes it OpenCode's equivalent of the Claude Code /
-     * Codex `Stop` hook. The plugin must pass the session id explicitly: unlike
-     * Claude (stdin transcript_path) and Codex (filename ordering), OpenCode
-     * exposes no reliable way for the CLI to infer which session just finished.
-     */
     event: async ({ event }) => {
       if (event.type !== "session.idle") {
         return
       }
 
-      const sessionID = event.properties.sessionID
-      if (!sessionID) {
-        console.warn("[git-ai] OpenCode session.idle did not include sessionID")
-        return
-      }
-
-      // OpenCode publishes session.idle while the final message/part may still
-      // be flushing to SQLite. Delay and retry so a completed turn is not
-      // silently missed by the external reporter.
-      const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
-      const delays = [1000, 1000, 1500]
-      for (let attempt = 0; attempt < delays.length; attempt += 1) {
-        await wait(delays[attempt])
-        try {
-          await runCommand(GIT_AI_BIN, ["report-token-usage", "opencode", "--session-id", sessionID])
-          console.info(`[git-ai] Reported OpenCode token usage for ${sessionID}`)
-          return
-        } catch (error) {
-          console.warn(
-            `[git-ai] OpenCode token report attempt ${attempt + 1}/${delays.length} failed for ${sessionID}: ${String(error)}`,
-          )
-        }
-      }
-
-      console.error(`[git-ai] Failed to report OpenCode token usage after retries: ${sessionID}`)
+      await handlers.reportTokenUsage(event.properties?.sessionID)
     },
   }
 }
+
+/**
+ * OpenCode V2 entrypoint.
+ *
+ * V2 requires a default export with an id and a setup function. It ignores the
+ * V1 named export, so both entrypoints can live in this one file. Hook inputs
+ * use `id`/`input` instead of `callID`/args, and the event stream moves from a
+ * callback to an async iterable where the session id lives on `data`.
+ */

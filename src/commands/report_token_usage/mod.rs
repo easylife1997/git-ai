@@ -9,9 +9,11 @@ pub mod codex;
 pub mod opencode;
 
 use crate::commands::tracker::config as tracker_config;
+use crate::commands::tracker::log::{LogKind, LogStatus, ReportOutcome, append_log};
 use crate::mdm::utils::home_dir;
 use serde::Deserialize;
 use serde::Serialize;
+use serde_json::Value;
 use std::io::{self, BufRead, Read};
 use std::time::Duration;
 
@@ -122,10 +124,13 @@ fn get_repo_url() -> Option<String> {
 }
 
 /// Upload token usage to the tracker server.
+///
+/// Returns the parsed server outcome: a 2xx response only proves the request
+/// arrived, and the server uses 200 even for "data did not grow, skipped".
 fn upload_usage(
     config: &tracker_config::TrackerConfig,
     usage: &TokenUsagePayload,
-) -> Result<(), String> {
+) -> Result<ReportOutcome, String> {
     let payload_str = serde_json::to_string(usage).map_err(|e| e.to_string())?;
     let url = format!("{}{}", config.tracker_url, API_PATH);
 
@@ -143,9 +148,68 @@ fn upload_usage(
             usage.session_id,
             usage.platform
         );
-        Ok(())
+        Ok(parse_token_response(
+            response.as_str().unwrap_or_default(),
+            ReportOutcome::from_http_status(response.status_code),
+        ))
     } else {
-        Err(format!("HTTP {}", response.status_code))
+        let mut outcome = ReportOutcome::from_http_status(response.status_code);
+        outcome.message = Some(format!("HTTP {}", response.status_code));
+        Ok(outcome)
+    }
+}
+
+/// Extract the server outcome from a token-usage response body.
+///
+/// Shape: `{"code":200,"data":{"success":true,"message":"上报成功","recordId":565}}`
+///
+/// `message` is `上报成功` for a new row or `数据未增长，已跳过` when the server
+/// had nothing new to store -- the latter is a no-op, not a failure.
+fn parse_token_response(body: &str, mut outcome: ReportOutcome) -> ReportOutcome {
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return outcome;
+    };
+    let Some(data) = value.get("data") else {
+        return outcome;
+    };
+
+    let success = data
+        .get("success")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    outcome.server_success = success;
+    outcome.record_id = data.get("recordId").and_then(Value::as_i64);
+    outcome.message = data
+        .get("message")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    // "数据未增长，已跳过" keeps the existing recordId but stores nothing new;
+    // treat it as saved only when the message indicates a real write.
+    outcome.saved =
+        success && outcome.record_id.is_some() && outcome.message.as_deref() == Some("上报成功");
+
+    outcome
+}
+
+#[cfg(test)]
+mod outcome_tests {
+    use super::*;
+
+    #[test]
+    fn token_response_requires_explicit_persistence_confirmation() {
+        for (message, saved, accepted) in [
+            ("上报成功", true, true),
+            ("数据未增长，已跳过", false, true),
+            ("未知消息", false, false),
+        ] {
+            let body = serde_json::json!({"data":{"success":true,"message":message,"recordId":42}});
+            let result =
+                parse_token_response(&body.to_string(), ReportOutcome::from_http_status(200));
+            assert_eq!(result.saved, saved);
+            assert_eq!(result.accepted(), accepted);
+        }
+        assert!(!parse_token_response("{}", ReportOutcome::from_http_status(200)).accepted());
     }
 }
 
@@ -236,6 +300,11 @@ pub fn handle_report_token_usage(args: &[String]) {
             return;
         }
     };
+
+    if !config.token_report {
+        tracing::debug!("token reporting disabled by token_report=false");
+        return;
+    }
 
     // Get user identity: prefer config username, fallback to git email
     let username = config
@@ -394,12 +463,34 @@ pub fn handle_report_token_usage(args: &[String]) {
         };
 
         match upload_usage(&config, &payload) {
-            Ok(()) => {
+            Ok(outcome) => {
                 tracing::debug!(
                     "token usage reported: session={} turn={}",
                     payload.session_id,
                     payload.turn_index
                 );
+                // One POST per turn, so one log line per turn -- that keeps the
+                // per-turn recordId auditable against the server.
+                let mut logged = outcome.clone();
+                logged.turn = Some(payload.turn_index);
+                logged.session_id = Some(payload.session_id.clone());
+                append_log(
+                    if logged.accepted() {
+                        LogStatus::Uploaded
+                    } else {
+                        LogStatus::NotSaved
+                    },
+                    LogKind::Token,
+                    &payload.session_id,
+                    &payload.platform,
+                    &payload.model,
+                    &state_key,
+                    None,
+                    Some(&logged),
+                );
+                if !outcome.accepted() {
+                    break; // Never advance past a rejected or malformed response.
+                }
                 max_reported = max_reported.max(payload.turn_index);
                 reported_count += 1;
             }
@@ -408,6 +499,22 @@ pub fn handle_report_token_usage(args: &[String]) {
                     "report-token-usage upload failed for turn {}: {}",
                     payload.turn_index,
                     e
+                );
+                let logged = ReportOutcome {
+                    turn: Some(payload.turn_index),
+                    session_id: Some(payload.session_id.clone()),
+                    message: Some(e.clone()),
+                    ..Default::default()
+                };
+                append_log(
+                    LogStatus::Failed,
+                    LogKind::Token,
+                    &payload.session_id,
+                    &payload.platform,
+                    &payload.model,
+                    &state_key,
+                    Some(&e),
+                    Some(&logged),
                 );
                 break; // Stop on first failure to maintain ordering
             }
@@ -432,8 +539,11 @@ pub fn handle_report_token_usage(args: &[String]) {
 
     if reported_count > 0 {
         println!(
-            "[git-ai token-report] {} reported: {} turns (up to turn {})",
-            platform, reported_count, max_reported
+            "[{} token-report] {} reported: {} turns (up to turn {})",
+            crate::config::PRODUCT_NAME,
+            platform,
+            reported_count,
+            max_reported
         );
     }
 }

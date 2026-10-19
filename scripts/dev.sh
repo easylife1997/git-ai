@@ -62,14 +62,24 @@ fi
 # Install binary via temp file + atomic mv to avoid macOS code signature cache
 # issues: direct cp reuses the inode, causing syspolicyd to fail validating the
 # changed binary, leaving the process stuck in launched-suspended state unkillably.
-echo "Installing binary to ~/.easylife-ai/bin/git-ai..."
-TMP_BIN="$HOME/.easylife-ai/bin/git-ai.tmp.$$"
+echo "Installing binary to ~/.easylife-ai/bin/easylife-ai..."
+TMP_BIN="$HOME/.easylife-ai/bin/easylife-ai.tmp.$$"
 cp "target/$BUILD_TYPE/git-ai" "$TMP_BIN"
-mv -f "$TMP_BIN" "$HOME/.easylife-ai/bin/git-ai"
-chmod +x "$HOME/.easylife-ai/bin/git-ai"
+mv -f "$TMP_BIN" "$HOME/.easylife-ai/bin/easylife-ai"
+chmod +x "$HOME/.easylife-ai/bin/easylife-ai"
 
-# Run install hooks
+# Run the canonical executable so hook paths and the git shim agree.
 echo "Running install hooks..."
-~/.easylife-ai/bin/git-ai install
+~/.easylife-ai/bin/easylife-ai install
+
+# Turn off updates for this machine. A published release outranks the local
+# build in semver terms, so the auto-updater would replace this dev binary
+# within the check interval. The replacement is older code: it drops newer
+# subcommands (Unknown git-ai command: doctor) and, because `install` wipes
+# and rewrites ~/.easylife-ai/skills, it also removes any skill it does not
+# embed. Both silently undo a `task dev`.
+echo "Disabling auto-updates for dev installs..."
+~/.easylife-ai/bin/easylife-ai config set disable_auto_updates true >/dev/null
+~/.easylife-ai/bin/easylife-ai config set disable_version_checks true >/dev/null
 
 echo "Done!"

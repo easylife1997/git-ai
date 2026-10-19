@@ -66,6 +66,9 @@ pub fn handle_git_ai(args: &[String]) {
                 | "install"
                 | "uninstall-hooks"
                 | "report-token-usage"
+                | "ops-check"
+                | "doctor"
+                | "legacy-cleanup"
         );
         if needs_daemon {
             use crate::daemon::telemetry_handle::{
@@ -392,6 +395,15 @@ pub fn handle_git_ai(args: &[String]) {
         "report-token-usage" => {
             commands::report_token_usage::handle_report_token_usage(&args[1..]);
         }
+        "ops-check" => {
+            commands::ops::handle_ops(&args[1..]);
+        }
+        "doctor" => {
+            commands::doctor::handle_doctor(&args[1..]);
+        }
+        "legacy-cleanup" => {
+            commands::legacy_cleanup::handle_legacy_cleanup(&args[1..]);
+        }
         _ => {
             println!("Unknown git-ai command: {}", args[0]);
             std::process::exit(1);
@@ -513,6 +525,24 @@ fn print_help() {
     eprintln!("  whoami             Show auth state and login identity");
     eprintln!("  report-token-usage   Report AI session token usage to tracker");
     eprintln!("    <platform>            Platform: claude-code, codex");
+    eprintln!(
+        "  ops-check          Print a prompt for an AI agent to troubleshoot via the ops skill"
+    );
+    eprintln!("    [question...]         Your question; omit for a placeholder");
+    eprintln!("    --skill, -s <name>    Use a specific skill (default: tracker-troubleshoot)");
+    eprintln!("    --list, -l            List installed ops skills");
+    eprintln!(
+        "  doctor             End-to-end self check of the reporting pipelines (really uploads)"
+    );
+    eprintln!("    --repo-url <url>      Verify against a real repo instead of a local one");
+    eprintln!("    --no-fix              Only report missing hooks/plugins, do not repair");
+    eprintln!("    --keep                Keep the temporary repository for inspection");
+    eprintln!("    --json                Print a machine-readable summary");
+    eprintln!();
+    eprintln!("  legacy-cleanup     Report or remove a leftover ~/.git-ai install");
+    eprintln!("    (no flag)             Report only; changes nothing");
+    eprintln!("    --yes                 Stop the old background service and rename the directory");
+    eprintln!("    --purge               Delete an already-renamed legacy directory");
     eprintln!("  version, -v, --version     Print the git-ai version");
     eprintln!("  help, -h, --help           Show this help message");
     eprintln!();

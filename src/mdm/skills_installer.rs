@@ -25,6 +25,10 @@ const EMBEDDED_SKILLS: &[EmbeddedSkill] = &[
         name: "ask",
         skill_md: include_str!("../../skills/ask/SKILL.md"),
     },
+    EmbeddedSkill {
+        name: "tracker-troubleshoot",
+        skill_md: include_str!("../../skills/tracker-troubleshoot/SKILL.md"),
+    },
 ];
 
 /// Result of installing skills

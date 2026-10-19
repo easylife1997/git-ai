@@ -114,7 +114,7 @@ Commit message 匹配以下任一规则时过滤：
 
 - **检查**：repo 的 remote URL 是否包含 blacklist 中的任意字符串（子串匹配）
 - **匹配字段**：`git remote get-url <remote>` 返回的 URL（如 `http://192.168.1.1:9080/team/my-repo.git`）
-- **配置**：`~/.git-ai/tracker-config.json` 的 `blacklist` 数组，推荐存储完整 remote URL
+- **配置**：`~/.easylife-ai/tracker-config.json` 的 `blacklist` 数组，推荐存储完整 remote URL
 
 ---
 
@@ -122,7 +122,7 @@ Commit message 匹配以下任一规则时过滤：
 
 ### 5.1 Retry Queue
 
-上报失败时，commit 信息写入 `~/.git-ai/tracker-retry-queue.json`：
+上报失败时，commit 信息写入 `~/.easylife-ai/tracker-retry-queue.json`：
 
 ```json
 [
@@ -156,7 +156,7 @@ easylife-ai tracker retry
 
 ### 6.1 Tracker 配置
 
-**路径**：`~/.git-ai/tracker-config.json`
+**路径**：`~/.easylife-ai/tracker-config.json`
 
 ```json
 {
@@ -236,7 +236,7 @@ irm https://github.com/easylife88-2026/easylife-ai/releases/latest/download/inst
 
 ### 6.2 Git-AI 主配置
 
-**路径**：`~/.git-ai/config.json`
+**路径**：`~/.easylife-ai/config.json`
 
 ```json
 {
@@ -260,7 +260,7 @@ irm https://github.com/easylife88-2026/easylife-ai/releases/latest/download/inst
 easylife-ai tracker retry
 ```
 
-- 读取 `~/.git-ai/tracker-retry-queue.json`
+- 读取 `~/.easylife-ai/tracker-retry-queue.json`
 - 对每个条目重新上报
 - 成功后清空队列
 - 输出：`tracker retry queue processed`
@@ -272,7 +272,7 @@ easylife-ai tracker log           # 查看最后 100 行
 easylife-ai tracker log -n 50     # 查看最后 50 行
 ```
 
-日志文件路径：`~/.git-ai/tracker-upload.log`
+日志文件路径：`~/.easylife-ai/tracker-upload.log`
 
 日志格式（每行）：
 
@@ -312,7 +312,7 @@ easylife-ai tracker blacklist remove <repo_url>       # 手动指定 URL 从黑�
 
 - 无参数时自动读取当前目录 `git remote get-url origin` 作为 pattern
 - 非 git 目录或无 remote origin 时报错提示
-- blacklist 存储在 `~/.git-ai/tracker-config.json` 的 `blacklist` 数组中，为全局配置
+- blacklist 存储在 `~/.easylife-ai/tracker-config.json` 的 `blacklist` 数组中，为全局配置
 
 ---
 
@@ -415,11 +415,22 @@ X-Team-Key: {team_key}
 
 ## 10. 故障排查
 
+**先用这两条命令**，大多数问题不用手工查日志：
+
+```bash
+easylife-ai doctor      # 端到端自检：真跑两条上报链路，自动修复缺失的 hook/插件
+easylife-ai ops-check   # 打印一段交给 AI 智能体的排查 prompt（自动带上最近一次 doctor 结果）
+```
+
+`doctor` 每次会真实上报 1 条代码记录 + 3 条 token 记录；`ops-check` 只打印，不产生任何上报数据。它默认内联 `~/.easylife-ai/doctor-last-report.txt`，用 `easylife-ai ops-check no-doctor` 可省略该段。
+
 | 现象 | 可能原因 | 解决方案 |
 |------|---------|---------|
-| push 后无 `uploaded` 输出 | 配置文件不存在 | 检查 `~/.git-ai/tracker-config.json` |
+| push 后无 `uploaded` 输出 | 配置文件不存在 | 检查 `~/.easylife-ai/tracker-config.json` |
 | push 后无 `uploaded` 输出 | commit 被过滤 | 执行 `easylife-ai tracker log` 查看跳过原因 |
 | `✗ 上报失败` | 网络问题 | 检查 `tracker_url` 可达性；稍后执行 `easylife-ai tracker retry` |
 | 重复上报 | note 丢失 | `git notes --ref=ai-tracker add -m "reported" <sha>` |
 | 正常 commit 被过滤 | 行数超过阈值 | 分批提交 |
 | 日志中大量 `已上报过` | 正常现象，push 时扫描了已上报的历史 commit | 无需处理 |
+| `Unknown git-ai command: doctor` | 本地构建被线上 release 覆盖 | 重跑 `task dev`；`scripts/dev.sh` 已自动关闭自动更新 |
+| token 无数据但 hook 正常 | `token_report` 被关闭 | 检查 `tracker-config.json` 的 `token_report`，缺失时默认 `true` |

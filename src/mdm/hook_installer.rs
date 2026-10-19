@@ -56,6 +56,11 @@ pub trait HookInstaller: Send + Sync {
     /// Check if the tool is installed and hook status
     fn check_hooks(&self, params: &HookInstallerParams) -> Result<HookCheckResult, GitAiError>;
 
+    /// Check plugin-only integration readiness separately from config hooks.
+    fn check_extras(&self, _params: &HookInstallerParams) -> Result<bool, GitAiError> {
+        Ok(false)
+    }
+
     /// Install or update hooks
     /// Returns Ok(Some(diff)) if changes were made, Ok(None) if already up to date
     fn install_hooks(

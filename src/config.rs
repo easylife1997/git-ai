@@ -22,6 +22,10 @@ pub const DEFAULT_API_BASE_URL: &str = "https://usegitai.com";
 /// Used for config, cache, databases, logs, etc.
 pub const APP_DIR_NAME: &str = ".easylife-ai";
 
+/// Product name shown to users in command output. The binary was once shipped
+/// as `git-ai`, so user-facing messages must not fall back to that name.
+pub const PRODUCT_NAME: &str = "easylife-ai";
+
 /// Prompt storage mode enum for type-safe handling
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PromptStorageMode {
