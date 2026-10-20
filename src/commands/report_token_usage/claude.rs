@@ -2,13 +2,14 @@
 //!
 //! Data source: `~/.claude/projects/<project>/<session>.jsonl`
 //!
-//! Each "turn" is identified by a user message with `promptSource: "typed"`.
+//! Each "turn" is identified by an explicit user prompt with `promptSource: "typed"`
+//! or `promptSource: "sdk"` (including Claude Code's `-p` mode).
 //! A turn may contain multiple assistant messages (text + tool_use + thinking)
 //! and tool_result messages.
 //!
-//! Token usage: each assistant message has `message.usage` with per-turn counts.
-//! - input_tokens is the same across all assistant messages in the same turn
-//! - output_tokens varies per message, sum them for total turn output
+//! Token usage is per model response, identified by `message.id`. Sum all usage
+//! fields across distinct responses, counting repeated content blocks for the
+//! same response only once.
 
 use super::TokenUsageData;
 use crate::mdm::utils::home_dir;
@@ -93,8 +94,9 @@ fn truncate_str(s: &str, max_len: usize) -> String {
 
 /// Parse all turns from a Claude JSONL file.
 ///
-/// A turn starts when we see `type="user"` + `content` is STRING + `promptSource="typed"`.
-/// Everything until the next such user message belongs to that turn.
+/// A turn starts with an explicit `typed` or `sdk` user prompt with string content.
+/// Tool results, attachments, and unmarked/system-injected messages do not start turns.
+/// Everything until the next explicit user prompt belongs to that turn.
 fn parse_turns_from_content(content: &str, file_path: &str) -> Vec<ParsedTurn> {
     let mut turns: Vec<ParsedTurn> = Vec::new();
 
@@ -168,21 +170,19 @@ fn parse_turns_from_content(content: &str, file_path: &str) -> Vec<ParsedTurn> {
                         continue;
                     }
 
-                    // Check promptSource to confirm it's a real user input
-                    let prompt_source = {
-                        if let Ok(v) = serde_json::from_str::<Value>(line) {
-                            v.get("promptSource")
-                                .and_then(|s| s.as_str())
-                                .unwrap_or("")
-                                .to_string()
-                        } else {
-                            String::new()
+                    // Require an explicit source; user-role strings alone may be
+                    // system injections. Claude Code's -p mode uses "sdk".
+                    let is_user_prompt = if let Ok(v) = serde_json::from_str::<Value>(line) {
+                        match v.get("promptSource").and_then(|s| s.as_str()) {
+                            Some("typed") => true,
+                            Some("sdk") => v.get("isMeta").and_then(|m| m.as_bool()) != Some(true),
+                            _ => false,
                         }
+                    } else {
+                        false
                     };
 
-                    if prompt_source != "typed" {
-                        // Not a real user input (could be tool_result wrapped in user role)
-                        // Still check if it's a tool_result LIST
+                    if !is_user_prompt {
                         continue;
                     }
 
@@ -285,11 +285,13 @@ fn parse_turns_from_content(content: &str, file_path: &str) -> Vec<ParsedTurn> {
                             .and_then(|v| v.as_i64())
                             .unwrap_or(0);
 
-                        // input_tokens is cumulative within a turn, take the last value
-                        turn_input_tokens = input;
+                        // Usage is per model response, not cumulative per user turn.
+                        // Distinct message IDs represent separate billed API calls,
+                        // even when their input counts happen to be identical.
+                        turn_input_tokens += input;
                         turn_output_tokens += output;
-                        turn_cache_read = cache_read;
-                        turn_cache_creation = cache_creation;
+                        turn_cache_read += cache_read;
+                        turn_cache_creation += cache_creation;
 
                         turn_cost = Some(
                             turn_cost.unwrap_or(0.0)
@@ -698,4 +700,144 @@ pub fn parse_turns_from_path(path: &str) -> Result<Vec<TokenUsageData>, String> 
     );
 
     Ok(turns_data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn transcript(entries: &[Value]) -> String {
+        entries
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn prompt(source: &str, text: &str) -> Value {
+        json!({
+            "type": "user", "sessionId": "session",
+            "promptSource": source, "timestamp": "2026-10-20T07:13:47.686Z",
+            "message": {"role": "user", "content": text}
+        })
+    }
+
+    fn response(id: &str, input: i64, output: i64, read: i64, creation: i64) -> Value {
+        json!({
+            "type": "assistant", "sessionId": "session",
+            "message": {
+                "role": "assistant", "id": id, "model": "claude-sonnet-4-6",
+                "content": [{"type": "text", "text": "Done."}],
+                "stop_reason": "end_turn",
+                "usage": {
+                    "input_tokens": input, "output_tokens": output,
+                    "cache_read_input_tokens": read,
+                    "cache_creation_input_tokens": creation
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn sdk_prompt_with_tool_result_matches_cli_usage() {
+        // Reduced from a Claude Code 2.1.304 -p transcript. The CLI cost-state
+        // reports inputTokens=200/outputTokens=40 for these two message IDs.
+        let mut request = prompt("sdk", "Create generated.py with a function returning 42.");
+        request["turnOrigin"] = json!("sdk");
+        request["entrypoint"] = json!("sdk-cli");
+        let mut tool_call = response("msg_verify_1", 100, 20, 0, 0);
+        tool_call["message"]["stop_reason"] = json!("tool_use");
+        tool_call["message"]["content"] = json!([{
+            "type": "tool_use", "id": "tool_verify_1", "name": "Write",
+            "input": {"file_path": "generated.py", "content": "def generated():\n    return 42\n"}
+        }]);
+        let content = transcript(&[
+            request,
+            json!({"type": "attachment", "renderedRole": "user",
+                "message": {"role": "user", "content": "Automatically attached context"}}),
+            tool_call,
+            json!({"type": "user", "message": {"role": "user", "content": [{
+                "type": "tool_result", "tool_use_id": "tool_verify_1",
+                "content": "File created successfully"
+            }]}}),
+            response("msg_verify_2", 100, 20, 0, 0),
+        ]);
+
+        let turns = parse_turns_from_content(&content, "session.jsonl");
+        assert_eq!(turns.len(), 1);
+        let turn = &turns[0];
+        assert_eq!(
+            turn.user_content,
+            "Create generated.py with a function returning 42."
+        );
+        assert_eq!(turn.model, "claude-sonnet-4-6");
+        assert_eq!(turn.assistant_text, "Done.");
+        assert_eq!(turn.input_tokens, 200);
+        assert_eq!(turn.output_tokens, 40);
+        assert_eq!(turn.total_tokens, 240);
+        let tools: Value = serde_json::from_str(turn.tool_uses_json.as_ref().unwrap()).unwrap();
+        assert_eq!(tools[0]["name"], "Write");
+        assert_eq!(tools[0]["result"], "File created successfully");
+    }
+
+    #[test]
+    fn sums_usage_per_distinct_model_message_not_per_content_block() {
+        let first = response("msg-1", 100, 20, 30, 40);
+        let mut another_block = first.clone();
+        another_block["message"]["content"] = json!([{"type": "thinking", "thinking": "..."}]);
+        let content = transcript(&[
+            prompt("typed", "Do the work"),
+            first,
+            another_block,
+            response("msg-2", 150, 25, 35, 45),
+            prompt("typed", "Next turn"),
+            response("msg-3", 10, 2, 3, 4),
+        ]);
+
+        let turns = parse_turns_from_content(&content, "session.jsonl");
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].input_tokens, 250);
+        assert_eq!(turns[0].output_tokens, 45);
+        assert_eq!(turns[0].cache_read_tokens, 65);
+        assert_eq!(turns[0].cache_creation_tokens, 85);
+        assert_eq!(turns[0].total_tokens, 445);
+        assert_eq!(turns[1].total_tokens, 19);
+    }
+
+    #[test]
+    fn typed_session_indices_ignore_injections_and_tool_results() {
+        let mut meta = prompt("sdk", "SDK metadata, not a prompt");
+        meta["isMeta"] = json!(true);
+        let content = transcript(&[
+            prompt("typed", "First prompt"),
+            response("msg-1", 100, 20, 0, 0),
+            prompt("", "Unmarked system injection"),
+            prompt("system", "System injection"),
+            meta,
+            prompt(
+                "sdk",
+                "This session is being continued from a previous conversation.",
+            ),
+            json!({"type": "user", "promptSource": "sdk", "message": {
+                "role": "user", "content": [{"type": "tool_result",
+                    "tool_use_id": "tool-1", "content": "Tool output"}]
+            }}),
+            response("msg-2", 100, 20, 0, 0),
+            prompt("typed", "Second prompt"),
+            response("msg-3", 10, 2, 0, 0),
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(&path, content).unwrap();
+
+        let turns = parse_turns_from_path(path.to_str().unwrap()).unwrap();
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].turn_index, 1);
+        assert_eq!(turns[0].user_prompts.as_deref(), Some("First prompt"));
+        assert_eq!(turns[0].total_tokens, 240);
+        assert_eq!(turns[1].turn_index, 2);
+        assert_eq!(turns[1].user_prompts.as_deref(), Some("Second prompt"));
+        assert_eq!(turns[1].total_tokens, 12);
+    }
 }

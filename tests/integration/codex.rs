@@ -827,7 +827,42 @@ fn test_codex_commit_inside_bash_inflight_repeated_append_keeps_file_ai_standard
     ]);
 }
 
+#[test]
+fn test_codex_native_apply_patch_attributes_only_edited_files() {
+    use crate::repos::test_repo::TestRepo;
+    let repo = TestRepo::new();
+    let root = repo.canonical_path();
+    fs::write(root.join("base.py"), "base = 1\n").unwrap();
+    repo.stage_all_and_commit("Initial base").unwrap();
+    repo.filename("base.py")
+        .assert_committed_lines(crate::lines!["base = 1".unattributed_human(),]);
+    fs::write(root.join("human.py"), "human = 2\n").unwrap();
+    let mut event = json!({
+        "session_id": "native-patch-session",
+        "cwd": root.to_string_lossy(),
+        "hook_event_name": "PreToolUse",
+        "tool_name": "apply_patch",
+        "tool_use_id": "patch-1",
+        "tool_input": {"command": "*** Begin Patch\n*** Add File: generated.py\n+generated = 42\n*** End Patch"},
+        "transcript_path": fixture_path("codex-session-simple.jsonl").to_string_lossy(),
+    });
+    repo.git_ai(&["checkpoint", "codex", "--hook-input", &event.to_string()])
+        .unwrap();
+    fs::write(root.join("generated.py"), "generated = 42\n").unwrap();
+    event["hook_event_name"] = json!("PostToolUse");
+    repo.git_ai(&["checkpoint", "codex", "--hook-input", &event.to_string()])
+        .unwrap();
+    repo.stage_all_and_commit("Native Codex patch").unwrap();
+    repo.filename("generated.py")
+        .assert_committed_lines(crate::lines!["generated = 42".ai()]);
+    repo.filename("human.py")
+        .assert_committed_lines(crate::lines!["human = 2".unattributed_human()]);
+    repo.filename("base.py")
+        .assert_committed_lines(crate::lines!["base = 1".unattributed_human()]);
+}
+
 crate::reuse_tests_in_worktree!(
+    test_codex_native_apply_patch_attributes_only_edited_files,
     test_parse_codex_rollout_transcript,
     test_codex_preset_legacy_hook_input,
     test_codex_preset_structured_hook_input,

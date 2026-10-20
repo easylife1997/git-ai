@@ -211,6 +211,56 @@ mod outcome_tests {
         }
         assert!(!parse_token_response("{}", ReportOutcome::from_http_status(200)).accepted());
     }
+
+    /// The lock is what makes concurrent reporters safe: exactly one process may
+    /// hold it, and it must be released on drop so the loser's retry succeeds.
+    #[test]
+    fn report_lock_is_exclusive_and_released_on_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = acquire_report_lock_in(dir.path()).expect("uncontended lock must be acquired");
+        assert!(
+            acquire_report_lock_in(dir.path()).is_none(),
+            "a second reporter must not hold the lock concurrently"
+        );
+        drop(first);
+        assert!(
+            acquire_report_lock_in(dir.path()).is_some(),
+            "the lock must be released when the holder finishes"
+        );
+    }
+}
+
+/// Serialize the read-report-write cycle across processes.
+///
+/// Two reporters can race for the same turn: OpenCode 1.18 loads both plugin
+/// files into one process, so its 1.x export and 2.x `server()` entry each kick
+/// off `report-token-usage` for the same settle event — two CLI processes, one
+/// state file. Without serialization both read the same `last_reported`, both
+/// pass the "new turns" filter, and the turn is uploaded twice.
+///
+/// Returns `None` when the lock stays busy past the timeout. The caller then
+/// proceeds unlocked rather than dropping the report: the tracker is the
+/// authority on duplicates (its per-commit/per-turn results distinguish
+/// `inserted` from `duplicated`), so losing a report is worse than a repeat.
+fn acquire_report_lock() -> Option<crate::utils::LockFile> {
+    acquire_report_lock_in(&home_dir().join(crate::config::APP_DIR_NAME))
+}
+
+fn acquire_report_lock_in(state_dir: &std::path::Path) -> Option<crate::utils::LockFile> {
+    let _ = std::fs::create_dir_all(state_dir);
+    let lock_path = state_dir.join("reported-turns.lock");
+
+    // A competing reporter is only ever mid-POST for a handful of milliseconds,
+    // so a short bounded wait captures every real race. It has to stay short:
+    // `opencode run` tears down the plugin as soon as the session goes idle, and
+    // the reporter runs inside that window.
+    for _ in 0..40 {
+        if let Some(lock) = crate::utils::LockFile::try_acquire(&lock_path) {
+            return Some(lock);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    None
 }
 
 /// Read the state file that tracks which turns have already been reported.
@@ -329,7 +379,7 @@ pub fn handle_report_token_usage(args: &[String]) {
     };
 
     // Try to read Stop hook stdin (contains transcript_path)
-    let stdin_payload = if platform == "claude-code" {
+    let stdin_payload = if platform == "claude-code" || platform == "codex" {
         try_read_stop_hook_stdin()
     } else {
         None
@@ -377,7 +427,14 @@ pub fn handle_report_token_usage(args: &[String]) {
                 }
             }
         }
-        "codex" => match codex::parse_turns() {
+        "codex" => match if let Some(payload) = &stdin_payload {
+            codex::parse_turns_from_path(
+                std::path::Path::new(&payload.transcript_path),
+                &payload.session_id,
+            )
+        } else {
+            codex::parse_turns()
+        } {
             Ok(Some((path, turns))) => (path, turns),
             Ok(None) => {
                 tracing::debug!("report-token-usage: no Codex session data found");
@@ -415,7 +472,10 @@ pub fn handle_report_token_usage(args: &[String]) {
         return;
     }
 
-    // Load incremental state
+    // Load incremental state. Hold the lock across the whole read-report-write
+    // cycle so a concurrent reporter for the same turn cannot read the stale
+    // index and upload it a second time.
+    let _report_lock = acquire_report_lock();
     let mut state = load_reported_turns();
     let last_reported = state.get(&state_key).copied().unwrap_or(0);
 
@@ -538,7 +598,9 @@ pub fn handle_report_token_usage(args: &[String]) {
     }
 
     if reported_count > 0 {
-        println!(
+        // Codex interprets non-empty stdout as a structured hook response.
+        // Keep diagnostics on stderr so a successful upload stays a successful hook.
+        eprintln!(
             "[{} token-report] {} reported: {} turns (up to turn {})",
             crate::config::PRODUCT_NAME,
             platform,

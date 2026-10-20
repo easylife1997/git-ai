@@ -333,12 +333,17 @@ const createGitAiHandlers = async () => {
     }
 
     // OpenCode publishes the settling event while the final message/part may
-    // still be flushing to storage. Delay and retry so a completed turn is not
-    // silently missed by the external reporter.
+    // still be flushing to storage, so a failed attempt is retried. The first
+    // attempt must not wait: `opencode run` exits as soon as the session goes
+    // idle, which tears down the plugin's pending work. Waiting first loses the
+    // report entirely; trying immediately usually lands before teardown, and
+    // subsequent attempts cover the flush race when it does not.
     const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
-    const delays = [1000, 1000, 1500]
+    const delays = [0, 1000, 1500]
     for (let attempt = 0; attempt < delays.length; attempt += 1) {
-      await wait(delays[attempt])
+      if (delays[attempt] > 0) {
+        await wait(delays[attempt])
+      }
       try {
         await runCommand(GIT_AI_BIN, ["report-token-usage", "opencode", "--session-id", sessionID])
         console.info(`[git-ai] Reported OpenCode token usage for ${sessionID}`)

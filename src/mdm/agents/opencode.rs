@@ -359,6 +359,52 @@ mod tests {
         );
     }
 
+    /// 1.18 loads the 2.x file through its legacy `server()` entrypoint and
+    /// rejects it outright (`must default export an object with server()`) when
+    /// that key is absent, which silently disables all attribution tracking.
+    #[test]
+    fn test_opencode_v2_template_also_serves_the_1_18_server_entrypoint() {
+        assert!(OPENCODE_PLUGIN_V2_CONTENT.contains("server: async (ctx: any)"));
+        // The legacy path reports on `session.idle`, which 1.x does publish.
+        assert!(OPENCODE_PLUGIN_V2_CONTENT.contains("event.type === \"session.idle\""));
+        assert!(
+            OPENCODE_PLUGIN_V2_CONTENT.contains("\"tool.execute.before\""),
+            "legacy server() must also register the pre-tool hook"
+        );
+    }
+
+    /// `opencode run` exits as soon as the session goes idle, killing pending
+    /// plugin work. Sleeping before the first report attempt therefore loses
+    /// every token upload; only retries may be delayed.
+    #[test]
+    fn test_opencode_templates_report_tokens_without_an_initial_delay() {
+        for content in [OPENCODE_PLUGIN_CONTENT, OPENCODE_PLUGIN_V2_CONTENT] {
+            assert!(
+                content.contains("const delays = [0, 1000, 1500]"),
+                "the first token report must not wait for teardown to win the race"
+            );
+            assert!(!content.contains("const delays = [1000, 1000, 1500]"));
+            assert!(content.contains("if (delays[attempt] > 0)"));
+        }
+    }
+
+    /// OpenCode 1.18 loads both plugin files in one process, so the 1.x export
+    /// and the 2.x `server()` entry both observe the same settle event and both
+    /// start a reporter (observed against 1.18.35: two identical `/token/usage`
+    /// POSTs for one `turn_index`). The plugins must NOT paper over that with a
+    /// per-session time window -- a second real turn on the same session inside
+    /// the window would be silently dropped. Deduplication belongs to the CLI,
+    /// which serializes its state read-report-write cycle on a file lock.
+    #[test]
+    fn test_opencode_templates_leave_dedup_to_the_cli() {
+        for content in [OPENCODE_PLUGIN_CONTENT, OPENCODE_PLUGIN_V2_CONTENT] {
+            assert!(
+                !content.contains("__gitAiTokenClaims"),
+                "a time-windowed claim drops genuine follow-up turns"
+            );
+        }
+    }
+
     #[test]
     fn test_opencode_v2_plugin_placeholder_substitution() {
         let content = OpenCodeInstaller::generate_plugin_v2_content(&create_test_binary_path());

@@ -104,7 +104,7 @@ impl CodexInstaller {
     fn config_hooks_enabled(config: &TomlValue) -> bool {
         config
             .get("features")
-            .and_then(|v| v.get("codex_hooks"))
+            .and_then(|v| v.get("hooks").or_else(|| v.get("codex_hooks")))
             .and_then(|v| v.as_bool())
             == Some(true)
     }
@@ -113,24 +113,118 @@ impl CodexInstaller {
         config: &TomlValue,
         _binary_path: &Path,
     ) -> Result<TomlValue, GitAiError> {
-        let mut merged = Self::remove_notify_if_git_ai(config)?.unwrap_or(config.clone());
+        let config = Self::remove_notify_if_git_ai(config)?.unwrap_or(config.clone());
+        let mut merged = Self::remove_codex_hooks_from_config(&config)?.0;
         let root = merged
             .as_table_mut()
             .ok_or_else(|| GitAiError::Generic("Codex config root must be a table".to_string()))?;
 
         if let Some(features) = root.get_mut("features").and_then(|v| v.as_table_mut()) {
+            features.insert("hooks".to_string(), TomlValue::Boolean(true));
             features.insert("codex_hooks".to_string(), TomlValue::Boolean(true));
         } else {
             root.insert(
                 "features".to_string(),
-                TomlValue::Table(Map::from_iter([(
-                    "codex_hooks".to_string(),
-                    TomlValue::Boolean(true),
-                )])),
+                TomlValue::Table(Map::from_iter([
+                    ("hooks".to_string(), TomlValue::Boolean(true)),
+                    ("codex_hooks".to_string(), TomlValue::Boolean(true)),
+                ])),
             );
         }
 
         Ok(merged)
+    }
+
+    fn is_git_ai_codex_toml_hook(hook: &TomlValue) -> bool {
+        hook.get("command")
+            .and_then(TomlValue::as_str)
+            .is_some_and(|command| {
+                Self::is_git_ai_codex_command(command)
+                    || (command.contains("report-token-usage") && command.contains("codex"))
+            })
+    }
+
+    fn event_state_prefix(event_name: &str) -> String {
+        let mut prefix = String::new();
+        for (index, character) in event_name.chars().enumerate() {
+            if character.is_ascii_uppercase() && index > 0 {
+                prefix.push('_');
+            }
+            prefix.push(character.to_ascii_lowercase());
+        }
+        format!("{prefix}:")
+    }
+
+    fn remove_codex_hooks_from_config(config: &TomlValue) -> Result<(TomlValue, bool), GitAiError> {
+        let mut merged = config.clone();
+        let root = merged
+            .as_table_mut()
+            .ok_or_else(|| GitAiError::Generic("Codex config root must be a table".to_string()))?;
+        let Some(hooks) = root.get_mut("hooks").and_then(TomlValue::as_table_mut) else {
+            return Ok((merged, false));
+        };
+
+        let mut removed_ids = Vec::new();
+        let mut changed_events = Vec::new();
+        for event_name in CODEX_HOOK_EVENTS {
+            let Some(entries) = hooks.get_mut(event_name).and_then(TomlValue::as_array_mut) else {
+                continue;
+            };
+            let mut event_changed = false;
+            entries.retain_mut(|entry| {
+                if Self::is_git_ai_codex_toml_hook(entry) {
+                    event_changed = true;
+                    if let Some(id) = entry.get("id").and_then(TomlValue::as_str) {
+                        removed_ids.push(id.to_string());
+                    }
+                    return false;
+                }
+
+                let Some(nested_hooks) = entry.get_mut("hooks").and_then(TomlValue::as_array_mut)
+                else {
+                    return true;
+                };
+                let before = nested_hooks.len();
+                nested_hooks.retain(|hook| !Self::is_git_ai_codex_toml_hook(hook));
+                if nested_hooks.len() != before {
+                    event_changed = true;
+                }
+                !nested_hooks.is_empty()
+            });
+            if event_changed {
+                changed_events.push(event_name);
+            }
+            if entries.is_empty() {
+                hooks.remove(event_name);
+            }
+        }
+
+        let mut changed = !changed_events.is_empty();
+        if let Some(state) = hooks.get_mut("state").and_then(TomlValue::as_table_mut) {
+            for id in removed_ids {
+                changed |= state.remove(&id).is_some();
+            }
+            for event_name in changed_events {
+                let prefix = Self::event_state_prefix(event_name);
+                let positional_keys = state
+                    .keys()
+                    .filter(|key| {
+                        key.starts_with(&prefix)
+                            || key
+                                .rsplit_once("config.toml:")
+                                .is_some_and(|(_, suffix)| suffix.starts_with(&prefix))
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for key in positional_keys {
+                    changed |= state.remove(&key).is_some();
+                }
+            }
+        }
+        if hooks.is_empty() {
+            root.remove("hooks");
+        }
+        Ok((merged, changed))
     }
 
     fn remove_notify_if_git_ai(config: &TomlValue) -> Result<Option<TomlValue>, GitAiError> {
@@ -732,6 +826,108 @@ notify = ["notify-send", "Codex"]
             merged.is_none(),
             "Custom notify config should remain untouched"
         );
+    }
+
+    #[test]
+    fn test_config_with_installed_hooks_migrates_toml_hooks_and_prunes_only_removed_states() {
+        let existing = CodexInstaller::parse_config_toml(
+            r#"
+model = "gpt-5"
+
+[features]
+other = true
+
+[hooks.state]
+legacy = true
+retained = true
+
+[[hooks.PreToolUse]]
+id = "legacy"
+command = "/old/git-ai checkpoint codex --hook-input stdin"
+
+[[hooks.PostToolUse]]
+id = "retained"
+command = "echo custom"
+"#,
+        )
+        .unwrap();
+
+        let merged =
+            CodexInstaller::config_with_installed_hooks(&existing, &test_binary_path()).unwrap();
+        assert!(merged["hooks"].get("PreToolUse").is_none());
+        assert_eq!(
+            merged["hooks"]["PostToolUse"][0]["command"].as_str(),
+            Some("echo custom")
+        );
+        assert!(merged["hooks"]["state"].get("legacy").is_none());
+        assert_eq!(merged["hooks"]["state"]["retained"].as_bool(), Some(true));
+        assert_eq!(merged["features"]["hooks"].as_bool(), Some(true));
+        assert_eq!(merged["features"]["codex_hooks"].as_bool(), Some(true));
+        assert_eq!(merged["features"]["other"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn test_remove_codex_hooks_from_nested_toml_blocks_prunes_positional_state() {
+        let existing = CodexInstaller::parse_config_toml(
+            r#"
+[hooks.state]
+"/Users/test/.codex/config.toml:post_tool_use:0:0" = true
+"/Users/test/.codex/config.toml:post_tool_use:1:0" = true
+"/Users/test/.codex/hooks.json:post_tool_use:0:0" = true
+"pre_tool_use:0:0" = true
+custom = true
+
+[[hooks.PostToolUse]]
+matcher = "*"
+
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = "/usr/local/bin/git-ai checkpoint codex --hook-input stdin"
+
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = "echo keep"
+
+[[hooks.PostToolUse]]
+matcher = "Bash"
+
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = "echo another custom command"
+"#,
+        )
+        .unwrap();
+
+        let (merged, changed) = CodexInstaller::remove_codex_hooks_from_config(&existing).unwrap();
+        assert!(changed);
+        assert_eq!(merged["hooks"]["PostToolUse"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            merged["hooks"]["PostToolUse"][0]["hooks"][0]["command"].as_str(),
+            Some("echo keep")
+        );
+        assert_eq!(
+            merged["hooks"]["PostToolUse"][1]["hooks"][0]["command"].as_str(),
+            Some("echo another custom command")
+        );
+        assert!(
+            merged["hooks"]["state"]
+                .get("/Users/test/.codex/config.toml:post_tool_use:0:0")
+                .is_none()
+        );
+        assert!(
+            merged["hooks"]["state"]
+                .get("/Users/test/.codex/config.toml:post_tool_use:1:0")
+                .is_none()
+        );
+        assert_eq!(
+            merged["hooks"]["state"]["/Users/test/.codex/hooks.json:post_tool_use:0:0"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            merged["hooks"]["state"]["pre_tool_use:0:0"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(merged["hooks"]["state"]["custom"].as_bool(), Some(true));
     }
 
     #[test]

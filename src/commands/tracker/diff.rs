@@ -9,7 +9,7 @@ const CODE_EXTENSIONS: &[&str] = &[
 ];
 
 /// Maximum diff size in KB. Change this constant to adjust the limit.
-const MAX_DIFF_SIZE_KB: usize = 1024 * 2;
+const MAX_DIFF_SIZE_KB: usize = 1024 * 5;
 
 pub fn collect_code_diff(repo_path: &str, commit_sha: &str) -> Result<Vec<u8>, String> {
     let output = Command::new("git")

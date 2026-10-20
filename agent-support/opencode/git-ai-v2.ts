@@ -332,12 +332,17 @@ const createGitAiHandlers = async () => {
     }
 
     // OpenCode publishes the settling event while the final message/part may
-    // still be flushing to storage. Delay and retry so a completed turn is not
-    // silently missed by the external reporter.
+    // still be flushing to storage, so a failed attempt is retried. The first
+    // attempt must not wait: `opencode run` exits as soon as the session goes
+    // idle, which tears down the plugin's pending work. Waiting first loses the
+    // report entirely; trying immediately usually lands before teardown, and
+    // subsequent attempts cover the flush race when it does not.
     const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
-    const delays = [1000, 1000, 1500]
+    const delays = [0, 1000, 1500]
     for (let attempt = 0; attempt < delays.length; attempt += 1) {
-      await wait(delays[attempt])
+      if (delays[attempt] > 0) {
+        await wait(delays[attempt])
+      }
       try {
         await runCommand(GIT_AI_BIN, ["report-token-usage", "opencode", "--session-id", sessionID])
         console.info(`[git-ai] Reported OpenCode token usage for ${sessionID}`)
@@ -364,6 +369,30 @@ const createGitAiHandlers = async () => {
 
 const gitAiPluginV2 = {
   id: "git-ai",
+  // OpenCode 1.18's server plugin loader consumes the legacy callback hooks.
+  // Later V2 builds use setup and the domain APIs below.
+  server: async (ctx: any) => {
+    const handlers = await createGitAiHandlers()
+    if (!handlers) return {}
+    return {
+      "tool.execute.before": async (input: any, output: any) => {
+        await handlers.handleToolBefore({
+          tool: input.tool, callID: input.callID, sessionID: input.sessionID,
+          cwd: input.cwd ?? ctx.directory,
+        }, output.args)
+      },
+      "tool.execute.after": async (input: any) => {
+        await handlers.handleToolAfter({
+          tool: input.tool, callID: input.callID, sessionID: input.sessionID,
+        })
+      },
+      event: async ({ event }: any) => {
+        if (event.type === "session.idle") {
+          await handlers.reportTokenUsage(event.properties?.sessionID)
+        }
+      },
+    }
+  },
   setup: async (ctx: any) => {
     // OpenCode V1 also scans this directory and will call `setup` with a
     // reduced context that has no `tool`/`event` domains. Bail out there so the

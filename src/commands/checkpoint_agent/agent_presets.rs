@@ -1617,6 +1617,52 @@ impl AgentCheckpointPreset for CodexPreset {
         let agent_metadata =
             transcript_path.map(|path| HashMap::from([("transcript_path".to_string(), path)]));
 
+        if tool_name == Some("apply_patch") {
+            let patch = hook_data
+                .get("tool_input")
+                .and_then(|input| input.get("command").or_else(|| input.get("patch")))
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let paths: Vec<String> = patch
+                .lines()
+                .filter_map(|line| {
+                    [
+                        "*** Add File: ",
+                        "*** Update File: ",
+                        "*** Delete File: ",
+                        "*** Move to: ",
+                    ]
+                    .iter()
+                    .find_map(|prefix| line.strip_prefix(prefix).map(str::to_string))
+                })
+                .collect();
+            if paths.is_empty() {
+                return Err(GitAiError::PresetError(
+                    "Codex patch contains no file paths".to_string(),
+                ));
+            }
+            return match hook_event_name {
+                Some("PreToolUse") | Some("PostToolUse") => Ok(AgentRunResult {
+                    agent_id,
+                    agent_metadata,
+                    checkpoint_kind: if hook_event_name == Some("PreToolUse") {
+                        CheckpointKind::Human
+                    } else {
+                        CheckpointKind::AiAgent
+                    },
+                    transcript: Some(transcript),
+                    repo_working_dir: Some(cwd.to_string()),
+                    edited_filepaths: Some(paths),
+                    will_edit_filepaths: None,
+                    dirty_files: None,
+                    captured_checkpoint_id: None,
+                }),
+                _ => Err(GitAiError::PresetError(
+                    "Unsupported Codex patch event".to_string(),
+                )),
+            };
+        }
+
         match hook_event_name {
             Some("PreToolUse") => {
                 if !is_bash_tool {

@@ -629,9 +629,8 @@ fn test_classify_tool_opencode() {
 #[test]
 fn test_classify_tool_codex() {
     assert_eq!(classify_tool(Agent::Codex, "Bash"), ToolClass::Bash);
-    // `apply_patch` is a real Codex edit tool, but today Codex file edits are
-    // handled via Stop rather than PreToolUse/PostToolUse tool hooks.
-    assert_eq!(classify_tool(Agent::Codex, "apply_patch"), ToolClass::Skip);
+    // Native patches emit paired hooks and use before/after snapshots.
+    assert_eq!(classify_tool(Agent::Codex, "apply_patch"), ToolClass::Bash);
     assert_eq!(classify_tool(Agent::Codex, "unknown"), ToolClass::Skip);
 }
 

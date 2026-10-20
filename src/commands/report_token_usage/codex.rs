@@ -7,7 +7,6 @@
 //! token counts are all associated with a turn_id.
 
 use super::TokenUsageData;
-use crate::mdm::utils::home_dir;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
@@ -405,7 +404,9 @@ fn parse_turns_from_content(content: &str) -> Vec<CodexTurn> {
 
 /// Find the latest JSONL session file in `~/.codex/sessions/`.
 fn find_latest_session() -> Option<(PathBuf, String)> {
-    let sessions_dir = home_dir().join(".codex").join("sessions");
+    let sessions_dir =
+        crate::commands::checkpoint_agent::agent_presets::CodexPreset::codex_home_dir()
+            .join("sessions");
     if !sessions_dir.exists() {
         return None;
     }
@@ -497,8 +498,15 @@ fn uses_legacy_indices(state: &HashMap<String, i64>, path: &str, turns: &[CodexT
 pub fn parse_turns() -> Result<Option<(String, Vec<TokenUsageData>)>, String> {
     let (path, session_id) =
         find_latest_session().ok_or("No Codex session logs found in ~/.codex/sessions/")?;
+    parse_turns_from_path(&path, &session_id)
+}
 
-    let content = fs::read_to_string(&path)
+/// Read the exact rollout identified by a Stop event, avoiding cross-session selection.
+pub fn parse_turns_from_path(
+    path: &std::path::Path,
+    session_id: &str,
+) -> Result<Option<(String, Vec<TokenUsageData>)>, String> {
+    let content = fs::read_to_string(path)
         .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
 
     let parsed = parse_turns_from_content(&content);
@@ -516,7 +524,7 @@ pub fn parse_turns() -> Result<Option<(String, Vec<TokenUsageData>)>, String> {
     let mut turns_data = Vec::new();
     for (i, turn) in parsed.iter().enumerate() {
         turns_data.push(TokenUsageData {
-            session_id: session_id.clone(),
+            session_id: session_id.to_string(),
             turn_index: if use_legacy_indices {
                 turn.legacy_turn_index
             } else {
@@ -558,6 +566,26 @@ pub fn parse_turns() -> Result<Option<(String, Vec<TokenUsageData>)>, String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn explicit_rollout_uses_hook_session_id_and_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("selected.jsonl");
+        fs::write(&path, rollout(&[
+            json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"selected"}}),
+            json!({"type":"turn_context","payload":{"turn_id":"selected","model":"selected-model"}}),
+            json!({"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120,"cached_input_tokens":0}}}}),
+            json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"selected"}}),
+        ])).unwrap();
+        let (key, turns) = parse_turns_from_path(&path, "hook-session-id")
+            .unwrap()
+            .unwrap();
+        assert_eq!(key, path.to_string_lossy());
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].session_id, "hook-session-id");
+        assert_eq!(turns[0].model, "selected-model");
+        assert_eq!(turns[0].total_tokens, 120);
+    }
 
     fn rollout(events: &[Value]) -> String {
         events
