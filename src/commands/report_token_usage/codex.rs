@@ -24,6 +24,10 @@ struct CodexTurn {
     cache_creation_tokens: i64,
     total_tokens: i64,
     legacy_turn_index: i64,
+    /// RFC3339 (UTC) timestamp of the `task_started` event.
+    started_at: Option<String>,
+    /// RFC3339 (UTC) timestamp of the `task_complete` event.
+    completed_at: Option<String>,
 }
 
 /// Parse all turns from a Codex JSONL file content.
@@ -36,6 +40,8 @@ fn parse_turns_from_content(content: &str) -> Vec<CodexTurn> {
     let mut models: HashMap<String, String> = HashMap::new();
     let mut tool_uses: HashMap<String, Vec<Value>> = HashMap::new();
     let mut turn_order: Vec<String> = Vec::new();
+    let mut turn_started_at: HashMap<String, String> = HashMap::new();
+    let mut turn_completed_at: HashMap<String, String> = HashMap::new();
     let mut aborted_turns: HashMap<String, bool> = HashMap::new();
     let mut active_turn: Option<String> = None;
     let mut legacy_user_messages: HashMap<String, String> = HashMap::new();
@@ -53,6 +59,10 @@ fn parse_turns_from_content(content: &str) -> Vec<CodexTurn> {
         };
 
         let event_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        let line_ts = v
+            .get("timestamp")
+            .and_then(|t| t.as_str())
+            .map(|s| s.to_string());
 
         match event_type {
             "event_msg" => {
@@ -73,6 +83,11 @@ fn parse_turns_from_content(content: &str) -> Vec<CodexTurn> {
                             }
                             legacy_turn_order.push(turn_id.to_string());
                             active_turn = Some(turn_id.to_string());
+                            if let Some(ts) = &line_ts {
+                                turn_started_at
+                                    .entry(turn_id.to_string())
+                                    .or_insert_with(|| ts.clone());
+                            }
                         }
                     }
                     "user_message" => {
@@ -154,6 +169,11 @@ fn parse_turns_from_content(content: &str) -> Vec<CodexTurn> {
                         {
                             if active_turn.as_deref() == Some(turn_id) {
                                 active_turn = None;
+                            }
+                            if let Some(ts) = &line_ts {
+                                turn_completed_at
+                                    .entry(turn_id.to_string())
+                                    .or_insert_with(|| ts.clone());
                             }
                         }
                     }
@@ -392,6 +412,8 @@ fn parse_turns_from_content(content: &str) -> Vec<CodexTurn> {
                 .rposition(|id| id == turn_id)
                 .map(|index| index as i64 + 1)
                 .unwrap_or(turns.len() as i64 + 1),
+            started_at: turn_started_at.get(turn_id).cloned(),
+            completed_at: turn_completed_at.get(turn_id).cloned(),
         });
     }
 
@@ -550,6 +572,8 @@ pub fn parse_turns_from_path(
                 Some(turn.assistant_text.clone())
             },
             tool_uses: turn.tool_uses_json.clone(),
+            turn_started_at: turn.started_at.clone(),
+            turn_completed_at: turn.completed_at.clone(),
         });
     }
 
@@ -598,7 +622,7 @@ mod tests {
     #[test]
     fn modern_rollout_associates_messages_and_tool_results_with_each_turn() {
         let content = rollout(&[
-            json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}),
+            json!({"timestamp":"2026-02-11T05:53:33.340Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}),
             json!({"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"system"}]}}),
             json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"first prompt"}]}}),
             json!({"type":"turn_context","payload":{"turn_id":"t1","model":"gpt-test"}}),
@@ -608,15 +632,15 @@ mod tests {
             json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"first answer"}],"phase":"final_answer"}}),
             json!({"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":25,"output_tokens":10,"total_tokens":110}}}}),
             json!({"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":40,"cached_input_tokens":10,"output_tokens":5,"total_tokens":45}}}}),
-            json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1"}}),
-            json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"t2"}}),
+            json!({"timestamp":"2026-02-11T05:53:36.420Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"t1"}}),
+            json!({"timestamp":"2026-02-11T05:53:36.500Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t2"}}),
             json!({"type":"turn_context","payload":{"turn_id":"t2","model":"gpt-test"}}),
             json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"second prompt"}]}}),
             json!({"type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","call_id":"c2","input":"patch"}}),
             json!({"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"c2","output":"done"}}),
             json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"second answer"}]}}),
             json!({"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":200,"cached_input_tokens":50,"output_tokens":20,"total_tokens":220}}}}),
-            json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"t2"}}),
+            json!({"timestamp":"2026-02-11T05:53:40.100Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"t2"}}),
         ]);
         let turns = parse_turns_from_content(&content);
         assert_eq!(turns.len(), 2);
@@ -643,6 +667,23 @@ mod tests {
         assert_eq!(tools[0]["name"], "apply_patch");
         assert_eq!(tools[0]["arguments"], "patch");
         assert_eq!(tools[0]["result"], "done");
+        // Native timing surfaces from task_started / task_complete event timestamps.
+        assert_eq!(
+            turns[0].started_at.as_deref(),
+            Some("2026-02-11T05:53:33.340Z")
+        );
+        assert_eq!(
+            turns[0].completed_at.as_deref(),
+            Some("2026-02-11T05:53:36.420Z")
+        );
+        assert_eq!(
+            turns[1].started_at.as_deref(),
+            Some("2026-02-11T05:53:36.500Z")
+        );
+        assert_eq!(
+            turns[1].completed_at.as_deref(),
+            Some("2026-02-11T05:53:40.100Z")
+        );
     }
 
     #[test]

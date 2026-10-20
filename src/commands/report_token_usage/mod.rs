@@ -62,6 +62,10 @@ pub struct TokenUsagePayload {
     pub assistant_responses: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_uses: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_completed_at: Option<String>,
     pub reported_at: String,
 }
 
@@ -81,6 +85,12 @@ pub struct TokenUsageData {
     pub user_prompts: Option<String>,
     pub assistant_responses: Option<String>,
     pub tool_uses: Option<String>,
+    /// RFC3339 (UTC+8): when this turn's user message was created. `None` when
+    /// the platform does not expose native timing.
+    pub turn_started_at: Option<String>,
+    /// RFC3339 (UTC+8): when this turn's final answer completed. `None` when
+    /// the platform does not expose native timing.
+    pub turn_completed_at: Option<String>,
 }
 
 /// Get the current user's git email for attribution.
@@ -516,6 +526,8 @@ pub fn handle_report_token_usage(args: &[String]) {
             user_prompts: turn.user_prompts.clone(),
             assistant_responses: turn.assistant_responses.clone(),
             tool_uses: turn.tool_uses.clone(),
+            turn_started_at: turn.turn_started_at.clone(),
+            turn_completed_at: turn.turn_completed_at.clone(),
             reported_at: {
                 let offset = chrono::FixedOffset::east_opt(8 * 3600).expect("valid offset");
                 chrono::Utc::now().with_timezone(&offset).to_rfc3339()

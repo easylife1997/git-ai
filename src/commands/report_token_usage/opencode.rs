@@ -45,6 +45,16 @@ struct MessageData {
     #[serde(rename = "modelID")]
     model_id: Option<String>,
     tokens: Option<MessageTokens>,
+    /// Native timing metadata, e.g. `{"created":1706459830000,"completed":1706459835000}`.
+    time: Option<MessageTime>,
+}
+
+/// `message.data.time` — epoch-milliseconds of message creation and (for
+/// completed assistant messages) completion. Mirrors what turn-timing.mjs reads.
+#[derive(Debug, Default, Deserialize)]
+struct MessageTime {
+    created: Option<i64>,
+    completed: Option<i64>,
 }
 
 /// `message.data.tokens`.
@@ -319,6 +329,10 @@ struct TurnAccumulator {
     cache_read: i64,
     cache_creation: i64,
     model: Option<String>,
+    /// Epoch-ms when this turn's user message was created.
+    started_ms: Option<i64>,
+    /// Epoch-ms when the turn's final completed assistant message finished.
+    completed_ms: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -396,6 +410,8 @@ fn parse_turns_v2(
         cache_write: i64,
         model: Option<String>,
         assistants: usize,
+        started_ms: Option<i64>,
+        completed_ms: Option<i64>,
     }
 
     let mut turns: Vec<V2Turn> = Vec::new();
@@ -413,6 +429,10 @@ fn parse_turns_v2(
                     .and_then(|t| t.as_str())
                     .unwrap_or("")
                     .to_string(),
+                started_ms: data
+                    .get("time")
+                    .and_then(|t| t.get("created"))
+                    .and_then(|v| v.as_i64()),
                 ..Default::default()
             });
             continue;
@@ -423,6 +443,14 @@ fn parse_turns_v2(
             continue;
         };
         turn.assistants += 1;
+
+        if let Some(completed) = data
+            .get("time")
+            .and_then(|t| t.get("completed"))
+            .and_then(|v| v.as_i64())
+        {
+            turn.completed_ms = Some(completed);
+        }
 
         if let Some(t) = data.get("tokens") {
             let n = |v: Option<&Value>| v.and_then(|x| x.as_i64()).unwrap_or(0);
@@ -507,6 +535,8 @@ fn parse_turns_v2(
             } else {
                 serde_json::to_string(&t.tools).ok()
             },
+            turn_started_at: t.started_ms.and_then(epoch_ms_to_rfc3339),
+            turn_completed_at: t.completed_ms.and_then(epoch_ms_to_rfc3339),
         });
     }
 
@@ -516,6 +546,17 @@ fn parse_turns_v2(
         session_id
     );
     Ok(Some(result))
+}
+
+/// Format native epoch-milliseconds as an RFC3339 timestamp in UTC+8, matching
+/// the shape the backend expects for `turn_started_at` / `turn_completed_at`.
+fn epoch_ms_to_rfc3339(epoch_ms: i64) -> Option<String> {
+    use chrono::TimeZone;
+    let offset = chrono::FixedOffset::east_opt(8 * 3600)?;
+    offset
+        .timestamp_millis_opt(epoch_ms)
+        .single()
+        .map(|dt| dt.to_rfc3339())
 }
 
 /// Parse all turns for a session out of the OpenCode database at `db_path`.
@@ -562,6 +603,7 @@ fn parse_turns_from_db(db_path: &Path, session_id: &str) -> Result<Vec<TokenUsag
         turn_of_user.insert(msg.id.clone(), turn_pos);
         let mut acc = TurnAccumulator {
             user_content: collect_text(&msg.parts),
+            started_ms: msg.data.time.as_ref().and_then(|t| t.created),
             ..Default::default()
         };
         // Carry the user message's own model hint when present.
@@ -601,6 +643,12 @@ fn parse_turns_from_db(db_path: &Path, session_id: &str) -> Result<Vec<TokenUsag
 
         let acc = &mut turns[turn_pos];
         acc.assistant_entries.push(idx);
+
+        if let Some(completed) = msg.data.time.as_ref().and_then(|t| t.completed) {
+            // The final completed assistant message (latest in creation order)
+            // finishes the turn; later messages in the same turn overwrite it.
+            acc.completed_ms = Some(completed);
+        }
 
         if let Some(tokens) = &msg.data.tokens {
             acc.input_tokens += tokens.input;
@@ -704,6 +752,8 @@ fn parse_turns_from_db(db_path: &Path, session_id: &str) -> Result<Vec<TokenUsag
                 Some(assistant_text)
             },
             tool_uses: tool_uses_json,
+            turn_started_at: acc.started_ms.and_then(epoch_ms_to_rfc3339),
+            turn_completed_at: acc.completed_ms.and_then(epoch_ms_to_rfc3339),
         });
     }
 
@@ -896,7 +946,7 @@ mod tests {
             "msg_a2",
             "ses_test",
             30,
-            r#"{"role":"assistant","parentID":"msg_u1","modelID":"claude-opus-4-8","tokens":{"total":200,"input":60,"output":90,"reasoning":50,"cache":{"write":0,"read":0}}}"#,
+            r#"{"role":"assistant","parentID":"msg_u1","modelID":"claude-opus-4-8","time":{"created":29,"completed":40},"tokens":{"total":200,"input":60,"output":90,"reasoning":50,"cache":{"write":0,"read":0}}}"#,
         );
         insert_part(
             &conn,
@@ -934,6 +984,17 @@ mod tests {
         assert_eq!(t.user_prompts.as_deref(), Some("hello world"));
         assert_eq!(t.assistant_responses.as_deref(), Some("done!"));
         assert!(t.cost_usd.is_none());
+
+        // Native turn timing surfaces from the user's created and the final
+        // assistant's completed epoch-ms (10 -> 40, rendered UTC+8 RFC3339).
+        assert_eq!(
+            t.turn_started_at.as_deref(),
+            Some("1970-01-01T08:00:00.010+08:00")
+        );
+        assert_eq!(
+            t.turn_completed_at.as_deref(),
+            Some("1970-01-01T08:00:00.040+08:00")
+        );
 
         // Tool usage captured with name / id / arguments / result.
         let tools: Value = serde_json::from_str(t.tool_uses.as_deref().unwrap()).unwrap();

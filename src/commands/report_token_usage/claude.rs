@@ -643,6 +643,12 @@ pub fn parse_turns() -> Result<Option<(String, Vec<TokenUsageData>)>, String> {
 }
 
 /// Parse all turns from a specific Claude Code JSONL file path.
+/// Non-whitespace string trimmed, else `None`.
+fn non_empty(s: &str) -> Option<String> {
+    let t = s.trim();
+    (!t.is_empty()).then(|| t.to_string())
+}
+
 ///
 /// Used when Stop hook provides transcript_path via stdin.
 /// Returns turns_with_indices_assigned.
@@ -690,6 +696,8 @@ pub fn parse_turns_from_path(path: &str) -> Result<Vec<TokenUsageData>, String> 
                 Some(turn.assistant_text.clone())
             },
             tool_uses: turn.tool_uses_json.clone(),
+            turn_started_at: non_empty(turn.user_timestamp.as_str()),
+            turn_completed_at: non_empty(turn.assistant_timestamp.as_str()),
         });
     }
 
@@ -839,5 +847,35 @@ mod tests {
         assert_eq!(turns[1].turn_index, 2);
         assert_eq!(turns[1].user_prompts.as_deref(), Some("Second prompt"));
         assert_eq!(turns[1].total_tokens, 12);
+    }
+
+    #[test]
+    fn native_turn_timing_is_carried_into_token_usage() {
+        let content = transcript(&[
+            json!({"type": "user", "sessionId": "session", "promptSource": "typed",
+                "timestamp": "2026-10-20T07:13:47.686Z",
+                "message": {"role": "user", "content": "First prompt"}}),
+            json!({"type": "assistant", "sessionId": "session",
+                "timestamp": "2026-10-20T07:14:12.900Z",
+                "message": {"role": "assistant", "id": "m1", "model": "claude-sonnet-4-6",
+                    "content": [{"type": "text", "text": "Done."}],
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 100, "output_tokens": 20,
+                        "cache_read_input_tokens": 5, "cache_creation_input_tokens": 0}}}),
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(&path, content).unwrap();
+
+        let turns = parse_turns_from_path(path.to_str().unwrap()).unwrap();
+        assert_eq!(turns.len(), 1);
+        assert_eq!(
+            turns[0].turn_started_at.as_deref(),
+            Some("2026-10-20T07:13:47.686Z")
+        );
+        assert_eq!(
+            turns[0].turn_completed_at.as_deref(),
+            Some("2026-10-20T07:14:12.900Z")
+        );
     }
 }
