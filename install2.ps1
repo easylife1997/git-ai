@@ -1,0 +1,731 @@
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+
+# ============================================================
+# easylife-ai installer for Windows
+# Downloads from GitHub releases and installs locally.
+# ============================================================
+
+function Write-ErrorAndExit {
+    param(
+        [Parameter(Mandatory = $true)][string]$Message
+    )
+    Write-Host "Error: $Message" -ForegroundColor Red
+    exit 1
+}
+
+function Write-Success {
+    param(
+        [Parameter(Mandatory = $true)][string]$Message
+    )
+    Write-Host $Message -ForegroundColor Green
+}
+
+function Write-Warning {
+    param(
+        [Parameter(Mandatory = $true)][string]$Message
+    )
+    Write-Host $Message -ForegroundColor Yellow
+}
+
+function Normalize-PathString {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    try {
+        return ([IO.Path]::GetFullPath($Path.Trim())).TrimEnd('\').ToLowerInvariant()
+    } catch {
+        return ($Path.Trim()).TrimEnd('\').ToLowerInvariant()
+    }
+}
+
+function Test-FileAvailable {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    try {
+        $stream = [System.IO.File]::Open($Path, 'Open', 'Write', 'None')
+        $stream.Close()
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Stop-EasylifeAiBackgroundService {
+    param(
+        [Parameter(Mandatory = $true)][string]$EasylifeAiExe,
+        [Parameter(Mandatory = $false)][switch]$Hard
+    )
+
+    if (-not (Test-Path -LiteralPath $EasylifeAiExe)) {
+        return $false
+    }
+
+    $args = @('bg', 'shutdown')
+    if ($Hard) {
+        $args += '--hard'
+    }
+
+    try {
+        & $EasylifeAiExe @args *> $null
+        return $LASTEXITCODE -eq 0
+    } catch {
+        return $false
+    }
+}
+
+function Get-EasylifeAiManagedProcesses {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallDir
+    )
+
+    $targetPaths = @(
+        (Normalize-PathString (Join-Path $InstallDir 'easylife-ai.exe')),
+        (Normalize-PathString (Join-Path $InstallDir 'git.exe'))
+    )
+
+    $processes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+            $_.ProcessId -ne $PID -and
+            $_.ExecutablePath -and
+            ($targetPaths -contains (Normalize-PathString $_.ExecutablePath))
+        })
+
+    return $processes
+}
+
+function Stop-EasylifeAiManagedProcesses {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallDir
+    )
+
+    $processes = @(Get-EasylifeAiManagedProcesses -InstallDir $InstallDir)
+    if ($processes.Count -eq 0) {
+        return $false
+    }
+
+    $pids = @($processes | Sort-Object ProcessId -Unique | Select-Object -ExpandProperty ProcessId)
+    Write-Warning ("Stopping lingering easylife-ai processes: {0}" -f ($pids -join ', '))
+
+    foreach ($pid in $pids) {
+        try {
+            Stop-Process -Id $pid -Force -ErrorAction Stop
+        } catch { }
+    }
+
+    return $true
+}
+
+function Wait-ForFileAvailable {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$InstallDir,
+        [Parameter(Mandatory = $false)][int]$MaxWaitSeconds = 300,
+        [Parameter(Mandatory = $false)][int]$RetryIntervalSeconds = 5,
+        [Parameter(Mandatory = $false)][int]$ForceKillAfterSeconds = 20
+    )
+
+    $elapsed = 0
+    $easylifeAiExe = Join-Path $InstallDir 'easylife-ai.exe'
+
+    [void](Stop-EasylifeAiBackgroundService -EasylifeAiExe $easylifeAiExe)
+
+    while ($elapsed -lt $MaxWaitSeconds) {
+        if (Test-FileAvailable -Path $Path) {
+            return $true
+        }
+
+        if ($elapsed -ge $ForceKillAfterSeconds) {
+            [void](Stop-EasylifeAiBackgroundService -EasylifeAiExe $easylifeAiExe -Hard)
+            [void](Stop-EasylifeAiManagedProcesses -InstallDir $InstallDir)
+        }
+
+        if (-not (Test-FileAvailable -Path $Path)) {
+            if ($elapsed -eq 0) {
+                Write-Host "Waiting for file to be available: $Path" -ForegroundColor Yellow
+            }
+            Start-Sleep -Seconds $RetryIntervalSeconds
+            $elapsed += $RetryIntervalSeconds
+        }
+    }
+    return $false
+}
+
+function Verify-Checksum {
+    param(
+        [Parameter(Mandatory = $true)][string]$File,
+        [Parameter(Mandatory = $true)][string]$BinaryName
+    )
+
+    if ($EmbeddedChecksums -eq '__CHECKSUMS_PLACEHOLDER__') {
+        return
+    }
+
+    $expected = $null
+    $entries = $EmbeddedChecksums -split '\|'
+    foreach ($entry in $entries) {
+        if ($entry -match "^([0-9a-fA-F]+)\s+$([regex]::Escape($BinaryName))$") {
+            $expected = $Matches[1]
+            break
+        }
+    }
+
+    if (-not $expected) {
+        Write-ErrorAndExit "No checksum found for $BinaryName"
+    }
+
+    $hashCommand = Get-Command Get-FileHash -ErrorAction SilentlyContinue
+    if ($null -ne $hashCommand) {
+        $actual = (Get-FileHash -Path $File -Algorithm SHA256).Hash.ToLower()
+    } else {
+        $stream = [System.IO.File]::OpenRead($File)
+        try {
+            $sha256 = [System.Security.Cryptography.SHA256]::Create()
+            $hashBytes = $sha256.ComputeHash($stream)
+            $actual = ([System.BitConverter]::ToString($hashBytes)).Replace('-', '').ToLower()
+        } finally {
+            $stream.Dispose()
+            if ($sha256) {
+                $sha256.Dispose()
+            }
+        }
+    }
+
+    if ($expected -ne $actual) {
+        Remove-Item -Force -ErrorAction SilentlyContinue $File
+        Write-ErrorAndExit "Checksum verification failed for $BinaryName`nExpected: $expected`nActual:   $actual"
+    }
+
+    Write-Success "Checksum verified for $BinaryName"
+}
+
+# GitHub repository details
+# Replaced during release builds with the actual repository (e.g., "easylife88-2026/easylife-ai")
+# When set to __REPO_PLACEHOLDER__, defaults to "easylife88-2026/easylife-ai"
+$Repo = '__REPO_PLACEHOLDER__'
+if ($Repo -eq '__REPO_PLACEHOLDER__') {
+    $Repo = 'easylife1997/easylife-ai'
+}
+
+# Version placeholder - replaced during release builds with actual version (e.g., "v1.0.24")
+# When set to __VERSION_PLACEHOLDER__, defaults to "latest"
+$PinnedVersion = '__VERSION_PLACEHOLDER__'
+
+# Embedded checksums - replaced during release builds with actual SHA256 checksums
+# Format: "hash  filename|hash  filename|..." (pipe-separated)
+# When set to __CHECKSUMS_PLACEHOLDER__, checksum verification is skipped
+$EmbeddedChecksums = '__CHECKSUMS_PLACEHOLDER__'
+
+# ============================================================
+# 用户可配置区 — 部署时按需修改以下变量
+# ============================================================
+
+# 安装目录：easylife-ai 二进制文件的安装位置
+# 默认安装到当前用户 home 目录下的 .easylife-ai\bin
+# 私有化部署或统一管理多用户时可改为绝对路径（如 C:\easylife-ai\bin）
+$InstallDir = Join-Path $HOME '.easylife-ai\bin'
+
+# 自动更新服务端地址：客户端检查新版本时访问的 URL
+# 私有化部署时改为内部服务器地址（如 https://your-internal-server.com）
+$UpdateReleaseUrl = 'http://192.168.110.18:5173/ai-code-boost/client-release/releases'
+
+# 稳定版更新目标版本：每次发布时手动更新，格式为 x.y.z
+$UpdateReleaseVersion = '1.0.1'
+
+# 自动更新检查间隔（秒）：默认 86400 秒（24 小时）
+# 设为更大的值可降低检查频率；设为 0 时客户端行为由 DisableAutoUpdates 控制
+$UpdateCheckIntervalSeconds = 3600
+
+# 更新通道：控制客户端跟踪哪个发布通道
+# 可选值：latest（稳定版）、next（预览版）
+$UpdateChannel = 'latest'
+
+# 是否禁用自动更新：$false = 允许自动更新（默认）；$true = 锁定当前版本，不自动升级
+# 注意：此值仅在用户配置文件中不存在该字段时写入，已有配置的用户不受影响
+$DisableAutoUpdates = $false
+
+# 是否禁用版本检查提示：$false = 正常显示版本过旧提示（默认）；$true = 静默跳过
+# 注意：与 DisableAutoUpdates 相同，仅在该字段缺失时写入
+$DisableVersionChecks = $false
+
+# ============================================================
+
+# Ensure TLS 1.2 for GitHub downloads on older PowerShell versions
+try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+} catch { }
+
+function Get-Architecture {
+    try {
+        $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+        switch ($arch) {
+            'X64' { return 'x64' }
+            'Arm64' { return 'arm64' }
+            default { return $null }
+        }
+    } catch {
+        $pa = $env:PROCESSOR_ARCHITECTURE
+        if ($pa -match 'ARM64') { return 'arm64' }
+        elseif ($pa -match '64') { return 'x64' }
+        else { return $null }
+    }
+}
+
+function Get-StdGitPath {
+    $cmd = Get-Command git.exe -ErrorAction SilentlyContinue
+    $gitPath = $null
+    if ($cmd -and $cmd.Path) {
+        # Ensure we never return a path for git that contains easylife-ai (recursive)
+        if ($cmd.Path -notmatch "easylife-ai") {
+            $gitPath = $cmd.Path
+        }
+    }
+
+    if (-not $gitPath) {
+        try {
+            $cfgPath = Join-Path $HOME ".easylife-ai\config.json"
+            if (Test-Path -LiteralPath $cfgPath) {
+                $cfg = Get-Content -LiteralPath $cfgPath -Raw | ConvertFrom-Json
+                if ($cfg -and $cfg.git_path -and ($cfg.git_path -notmatch 'easylife-ai') -and (Test-Path -LiteralPath $cfg.git_path)) {
+                    $gitPath = $cfg.git_path
+                }
+            }
+        } catch { }
+    }
+
+    if (-not $gitPath) {
+        Write-ErrorAndExit "Could not detect a standard git binary on PATH. Please ensure you have Git installed and available on your PATH. If you believe this is a bug with the installer, please file an issue at https://github.com/easylife88-2026/easylife-ai/issues."
+    }
+
+    try {
+        & $gitPath --version | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'bad' }
+    } catch {
+        Write-ErrorAndExit "Detected git at $gitPath is not usable (--version failed). Please ensure you have Git installed and available on your PATH. If you believe this is a bug with the installer, please file an issue at https://github.com/easylife88-2026/easylife-ai/issues."
+    }
+
+    return $gitPath
+}
+
+# Ensure $PathToAdd is inserted before any PATH entry that contains "git" (case-insensitive)
+# Updates Machine (system) PATH; if not elevated, emits a prominent error with instructions
+function Set-PathPrependBeforeGit {
+    param(
+        [Parameter(Mandatory = $true)][string]$PathToAdd
+    )
+
+    $sep = ';'
+
+    function NormalizePath([string]$p) {
+        try { return ([IO.Path]::GetFullPath($p.Trim())).TrimEnd('\\').ToLowerInvariant() }
+        catch { return ($p.Trim()).TrimEnd('\\').ToLowerInvariant() }
+    }
+
+    $normalizedAdd = NormalizePath $PathToAdd
+
+    function BuildPathWithInsert([string]$existingPath, [string]$toInsert) {
+        $entries = @()
+        if ($existingPath) { $entries = ($existingPath -split $sep) | Where-Object { $_ -and $_.Trim() -ne '' } }
+
+        $list = New-Object System.Collections.Generic.List[string]
+        $seen = New-Object 'System.Collections.Generic.HashSet[string]'
+        foreach ($e in $entries) {
+            $n = NormalizePath $e
+            if (-not $seen.Contains($n) -and $n -ne $normalizedAdd) {
+                $seen.Add($n) | Out-Null
+                $list.Add($e) | Out-Null
+            }
+        }
+
+        $insertIndex = 0
+        for ($i = 0; $i -lt $list.Count; $i++) {
+            if ($list[$i] -match '(?i)git') { $insertIndex = $i; break }
+        }
+
+        $list.Insert($insertIndex, $toInsert)
+        return ($list -join $sep)
+    }
+
+    $userStatus = 'Skipped'
+    try {
+        $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+        $newUserPath = BuildPathWithInsert -existingPath $userPath -toInsert $PathToAdd
+        if ($newUserPath -ne $userPath) {
+            [Environment]::SetEnvironmentVariable('Path', $newUserPath, 'User')
+            $userStatus = 'Updated'
+        } else {
+            $userStatus = 'AlreadyPresent'
+        }
+    } catch {
+        $userStatus = 'Error'
+    }
+
+    $machineStatus = 'Skipped'
+    try {
+        $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+        $newMachinePath = BuildPathWithInsert -existingPath $machinePath -toInsert $PathToAdd
+        if ($newMachinePath -ne $machinePath) {
+            [Environment]::SetEnvironmentVariable('Path', $newMachinePath, 'Machine')
+            $machineStatus = 'Updated'
+        } else {
+            $machineStatus = 'AlreadyPresent'
+        }
+    } catch {
+        $origGit = $null
+        try { $origGit = Get-StdGitPath } catch { }
+        $origGitDir = if ($origGit) { (Split-Path $origGit -Parent) } else { 'your Git installation directory' }
+        Write-Host ''
+        Write-Host 'ERROR: Unable to update the SYSTEM PATH (administrator rights required).' -ForegroundColor Red
+        Write-Host 'Your PATH was NOT changed. To ensure easylife-ai takes precedence over Git:' -ForegroundColor Red
+        Write-Host ("  1) Run PowerShell as Administrator and re-run this installer; OR") -ForegroundColor Red
+        Write-Host ("  2) Manually edit the SYSTEM Path and move '{0}' before any entries containing 'Git' (e.g. '{1}')." -f $PathToAdd, $origGitDir) -ForegroundColor Red
+        Write-Host "     Steps: Start -> type 'Environment Variables' -> 'Edit the system environment variables' -> Environment Variables ->" -ForegroundColor Red
+        Write-Host ("            Under 'System variables', select 'Path' -> Edit -> Move '{0}' to the top (before Git) -> OK." -f $PathToAdd) -ForegroundColor Red
+        Write-Host ''
+        if ($userStatus -eq 'Updated' -or $userStatus -eq 'AlreadyPresent') {
+            Write-Host 'User PATH was updated successfully, so easylife-ai will still take precedence for this account.' -ForegroundColor Yellow
+        }
+        $machineStatus = 'Error'
+    }
+
+    try {
+        $procPath = $env:PATH
+        $newProcPath = BuildPathWithInsert -existingPath $procPath -toInsert $PathToAdd
+        if ($newProcPath -ne $procPath) { $env:PATH = $newProcPath }
+    } catch { }
+
+    return [PSCustomObject]@{
+        UserStatus    = $userStatus
+        MachineStatus = $machineStatus
+    }
+}
+
+$stdGitPath = Get-StdGitPath
+
+$arch = Get-Architecture
+if (-not $arch) { Write-ErrorAndExit "Unsupported architecture: $([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)" }
+$os = 'windows'
+
+$binaryName = "easylife-ai-$os-$arch"
+
+# Determine release tag
+# Priority: 1. Local binary override, 2. Pinned version (for release builds), 3. Environment variable, 4. "latest"
+if (-not [string]::IsNullOrWhiteSpace($env:EASYLIFE_AI_LOCAL_BINARY)) {
+    $releaseTag = 'local'
+} elseif ($PinnedVersion -ne '__VERSION_PLACEHOLDER__') {
+    $releaseTag = $PinnedVersion
+    $downloadUrlExe = "$UpdateReleaseUrl/$releaseTag/download/$binaryName.exe"
+    $downloadUrlNoExt = "$UpdateReleaseUrl/$releaseTag/download/$binaryName"
+} elseif (-not [string]::IsNullOrWhiteSpace($env:EASYLIFE_AI_RELEASE_TAG) -and $env:EASYLIFE_AI_RELEASE_TAG -ne 'latest') {
+    $releaseTag = $env:EASYLIFE_AI_RELEASE_TAG
+    $downloadUrlExe = "$UpdateReleaseUrl/$releaseTag/download/$binaryName.exe"
+    $downloadUrlNoExt = "$UpdateReleaseUrl/$releaseTag/download/$binaryName"
+} else {
+    $releaseTag = 'latest'
+    $downloadUrlExe = "$UpdateReleaseUrl/latest/download/$binaryName.exe"
+    $downloadUrlNoExt = "$UpdateReleaseUrl/latest/download/$binaryName"
+}
+
+# Install directory: %USERPROFILE%\.easylife-ai\bin
+New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+
+Write-Host ("Downloading easylife-ai (release: {0})..." -f $releaseTag)
+$tmpFile = Join-Path $InstallDir "easylife-ai.tmp.$PID.exe"
+
+function Try-Download {
+    param(
+        [Parameter(Mandatory = $true)][string]$Url
+    )
+    try {
+        $oldProgressPreference = $ProgressPreference
+        $ProgressPreference = 'SilentlyContinue'
+        try {
+            Invoke-WebRequest -Uri $Url -OutFile $tmpFile -UseBasicParsing -ErrorAction Stop
+        } finally {
+            $ProgressPreference = $oldProgressPreference
+        }
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+$downloadedBinaryName = $null
+if (-not [string]::IsNullOrWhiteSpace($env:EASYLIFE_AI_LOCAL_BINARY)) {
+    if (-not (Test-Path -LiteralPath $env:EASYLIFE_AI_LOCAL_BINARY)) {
+        Remove-Item -Force -ErrorAction SilentlyContinue $tmpFile
+        Write-ErrorAndExit "Local binary not found at $($env:EASYLIFE_AI_LOCAL_BINARY)"
+    }
+    Copy-Item -Force -Path $env:EASYLIFE_AI_LOCAL_BINARY -Destination $tmpFile
+    $downloadedBinaryName = "$binaryName.exe"
+} elseif (Try-Download -Url $downloadUrlExe) {
+    $downloadedBinaryName = "$binaryName.exe"
+} elseif (Try-Download -Url $downloadUrlNoExt) {
+    $downloadedBinaryName = $binaryName
+}
+
+if (-not $downloadedBinaryName) {
+    Remove-Item -Force -ErrorAction SilentlyContinue $tmpFile
+    Write-ErrorAndExit 'Failed to download binary (HTTP error)'
+}
+
+try {
+    if ((Get-Item $tmpFile).Length -le 0) {
+        Remove-Item -Force -ErrorAction SilentlyContinue $tmpFile
+        Write-ErrorAndExit 'Downloaded file is empty'
+    }
+} catch {
+    Remove-Item -Force -ErrorAction SilentlyContinue $tmpFile
+    Write-ErrorAndExit 'Download failed'
+}
+
+Verify-Checksum -File $tmpFile -BinaryName $downloadedBinaryName
+
+$finalExe = Join-Path $InstallDir 'easylife-ai.exe'
+
+if (Test-Path -LiteralPath $finalExe) {
+    if (-not (Wait-ForFileAvailable -Path $finalExe -InstallDir $InstallDir -MaxWaitSeconds 300 -RetryIntervalSeconds 5)) {
+        Remove-Item -Force -ErrorAction SilentlyContinue $tmpFile
+        Write-ErrorAndExit "Timeout waiting for $finalExe to be available. Please close any running easylife-ai processes and try again."
+    }
+}
+
+Move-Item -Force -Path $tmpFile -Destination $finalExe
+try { Unblock-File -Path $finalExe -ErrorAction SilentlyContinue } catch { }
+
+# Create a shim so calling `git` goes through easylife-ai by PATH precedence
+$gitShim = Join-Path $InstallDir 'git.exe'
+
+if (Test-Path -LiteralPath $gitShim) {
+    if (-not (Wait-ForFileAvailable -Path $gitShim -InstallDir $InstallDir -MaxWaitSeconds 300 -RetryIntervalSeconds 5)) {
+        Write-ErrorAndExit "Timeout waiting for $gitShim to be available. Please close any running git processes and try again."
+    }
+}
+
+Copy-Item -Force -Path $finalExe -Destination $gitShim
+try { Unblock-File -Path $gitShim -ErrorAction SilentlyContinue } catch { }
+
+# Create a shim so calling `git-og` invokes the standard Git
+$gitOgShim = Join-Path $InstallDir 'git-og.cmd'
+$gitOgShimContent = "@echo off$([Environment]::NewLine)`"$stdGitPath`" %*$([Environment]::NewLine)"
+Set-Content -Path $gitOgShim -Value $gitOgShimContent -Encoding ASCII -Force
+try { Unblock-File -Path $gitOgShim -ErrorAction SilentlyContinue } catch { }
+
+$needLogin = $false
+if ($env:INSTALL_NONCE -and $env:API_BASE) {
+    try {
+        & $finalExe exchange-nonce | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            $needLogin = $true
+        }
+    } catch {
+        $needLogin = $true
+    }
+}
+
+Write-Host 'Setting up IDE/agent hooks...'
+try {
+    & $finalExe install-hooks | Out-Host
+    Write-Success 'Successfully set up IDE/agent hooks'
+} catch {
+    Write-Warning "Warning: Failed to set up IDE/agent hooks. Please try running 'easylife-ai install-hooks' manually."
+}
+
+$skipPathUpdate = $env:EASYLIFE_AI_SKIP_PATH_UPDATE -eq '1'
+if ($skipPathUpdate) {
+    Write-Warning 'Skipping PATH updates because EASYLIFE_AI_SKIP_PATH_UPDATE=1'
+    $pathUpdate = [PSCustomObject]@{
+        UserStatus    = 'Skipped'
+        MachineStatus = 'Skipped'
+    }
+} else {
+    $pathUpdate = Set-PathPrependBeforeGit -PathToAdd $InstallDir
+}
+if ($pathUpdate.UserStatus -eq 'Updated') {
+    Write-Success 'Successfully added easylife-ai to the user PATH.'
+} elseif ($pathUpdate.UserStatus -eq 'AlreadyPresent') {
+    Write-Success 'easylife-ai already present in the user PATH.'
+} elseif ($pathUpdate.UserStatus -eq 'Error') {
+    Write-Host 'Failed to update the user PATH.' -ForegroundColor Red
+}
+
+if ($pathUpdate.MachineStatus -eq 'Updated') {
+    Write-Success 'Successfully added easylife-ai to the system PATH.'
+} elseif ($pathUpdate.MachineStatus -eq 'AlreadyPresent') {
+    Write-Success 'easylife-ai already present in the system PATH.'
+} elseif ($pathUpdate.MachineStatus -eq 'Error') {
+    Write-Host 'PATH update failed: system PATH unchanged.' -ForegroundColor Red
+}
+
+Write-Success "Successfully installed easylife-ai into $InstallDir"
+Write-Success "You can now run 'easylife-ai' from your terminal"
+
+# Print installed version
+$installedVersion = & $finalExe --version 2>&1
+Write-Host "Installed easylife-ai $installedVersion"
+
+# Configure Git Bash shell profiles so easylife-ai takes precedence over /mingw64/bin/git
+$gitBashConfigured = $false
+$gitBashAlreadyConfigured = $false
+try {
+    $bashrcPath = Join-Path $HOME '.bashrc'
+    $bashProfilePath = Join-Path $HOME '.bash_profile'
+    $pathCmd = 'export PATH="$HOME/.easylife-ai/bin:$PATH"'
+    $markerString = '.easylife-ai/bin'
+
+    $gitBashInstalled = $false
+    $gitForWindowsPaths = @()
+    if ($env:ProgramFiles) { $gitForWindowsPaths += Join-Path $env:ProgramFiles 'Git\bin\bash.exe' }
+    if (${env:ProgramFiles(x86)}) { $gitForWindowsPaths += Join-Path ${env:ProgramFiles(x86)} 'Git\bin\bash.exe' }
+    if ($env:LOCALAPPDATA) { $gitForWindowsPaths += Join-Path $env:LOCALAPPDATA 'Programs\Git\bin\bash.exe' }
+    foreach ($p in $gitForWindowsPaths) {
+        if ($p -and (Test-Path -LiteralPath $p)) {
+            $gitBashInstalled = $true
+            break
+        }
+    }
+
+    if ($gitBashInstalled) {
+        $targetBashConfig = $null
+        if (Test-Path -LiteralPath $bashrcPath) {
+            $targetBashConfig = $bashrcPath
+        } elseif (Test-Path -LiteralPath $bashProfilePath) {
+            $targetBashConfig = $bashProfilePath
+        } else {
+            $targetBashConfig = $bashrcPath
+        }
+
+        $alreadyPresent = $false
+        if (Test-Path -LiteralPath $targetBashConfig) {
+            $content = Get-Content -LiteralPath $targetBashConfig -Raw -ErrorAction SilentlyContinue
+            if ($content -and $content.Contains($markerString)) {
+                $alreadyPresent = $true
+            }
+        }
+
+        if ($alreadyPresent) {
+            $gitBashAlreadyConfigured = $true
+        } else {
+            $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+            $appendContent = "`n# Added by easylife-ai installer on $timestamp`n$pathCmd`n"
+            $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+            [System.IO.File]::AppendAllText($targetBashConfig, $appendContent, $utf8NoBom)
+            $gitBashConfigured = $true
+        }
+    }
+} catch {
+    Write-Host "Warning: Failed to configure Git Bash: $($_.Exception.Message)" -ForegroundColor Yellow
+}
+
+if ($gitBashConfigured) {
+    Write-Success "Successfully configured Git Bash ($targetBashConfig)"
+} elseif ($gitBashAlreadyConfigured) {
+    Write-Success "Git Bash already configured ($targetBashConfig)"
+}
+
+# Initialize update configuration without overwriting user settings.
+try {
+    $configDir = Join-Path $HOME '.easylife-ai'
+    $configJsonPath = Join-Path $configDir 'config.json'
+    $tmpConfigJsonPath = "$configJsonPath.tmp.$PID"
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    New-Item -ItemType Directory -Force -Path $configDir | Out-Null
+
+    if (Test-Path -LiteralPath $configJsonPath) {
+        $cfg = Get-Content -LiteralPath $configJsonPath -Raw | ConvertFrom-Json
+        if ($null -eq $cfg -or $cfg -isnot [pscustomobject]) {
+            throw "config root must be a JSON object"
+        }
+    } else {
+        $cfg = [pscustomobject]@{
+            git_path = $stdGitPath
+            feature_flags = [pscustomobject]@{
+                async_mode = $true
+            }
+        }
+    }
+
+    # Always overwrite these three fields regardless of existing values.
+    $overwrite = [ordered]@{
+        update_release_url = $UpdateReleaseUrl
+        update_release_version = $UpdateReleaseVersion
+        update_check_interval_seconds = $UpdateCheckIntervalSeconds
+        update_channel = $UpdateChannel
+    }
+    foreach ($entry in $overwrite.GetEnumerator()) {
+        if ($cfg.PSObject.Properties.Name -contains $entry.Key) {
+            $cfg.($entry.Key) = $entry.Value
+        } else {
+            $cfg | Add-Member -NotePropertyName $entry.Key -NotePropertyValue $entry.Value
+        }
+    }
+    # Only fill these if absent — user may have intentionally disabled updates.
+    $fillIfAbsent = [ordered]@{
+        disable_auto_updates = $DisableAutoUpdates
+        disable_version_checks = $DisableVersionChecks
+    }
+    foreach ($entry in $fillIfAbsent.GetEnumerator()) {
+        if (-not ($cfg.PSObject.Properties.Name -contains $entry.Key)) {
+            $cfg | Add-Member -NotePropertyName $entry.Key -NotePropertyValue $entry.Value
+        }
+    }
+
+    $cfg | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $tmpConfigJsonPath -Encoding UTF8
+    $jsonText = [System.IO.File]::ReadAllText($tmpConfigJsonPath)
+    [System.IO.File]::WriteAllText($configJsonPath, $jsonText, $utf8NoBom)
+    Remove-Item -LiteralPath $tmpConfigJsonPath -Force -ErrorAction SilentlyContinue
+} catch {
+    Remove-Item -LiteralPath $tmpConfigJsonPath -Force -ErrorAction SilentlyContinue
+    Write-Host "Warning: Failed to update config.json: $($_.Exception.Message)" -ForegroundColor Yellow
+}
+
+$trackerConfigPath = Join-Path $configDir 'tracker-config.json'
+if ($env:TRACKER_URL -and $env:TEAM_ID -and $env:TEAM_KEY) {
+    try {
+        $existingBlacklist = @()
+        if (Test-Path -LiteralPath $trackerConfigPath) {
+            try {
+                $existing = Get-Content -LiteralPath $trackerConfigPath -Raw | ConvertFrom-Json
+                if ($existing.blacklist) { $existingBlacklist = $existing.blacklist }
+            } catch { }
+        }
+
+        # USER_NAME is the sole source of tracker identity. Do not fall back
+        # to USERNAME, GIT_AI_USERNAME, or git user.email.
+        $installUsername = $env:USER_NAME
+        if ([string]::IsNullOrWhiteSpace($installUsername)) {
+            Write-Warning "USER_NAME is missing or blank; tracker configuration was not written."
+            $installUsername = $null
+        }
+
+        if ($installUsername) {
+            Write-Host "Configuring tracker with username: $installUsername (from USER_NAME)"
+        }
+
+        if ($installUsername) {
+            $trackerCfg = @{
+                tracker_url = $env:TRACKER_URL
+                team_id     = $env:TEAM_ID
+                team_key    = $env:TEAM_KEY
+                username    = $installUsername
+                blacklist   = $existingBlacklist
+            }
+            $trackerCfg = $trackerCfg | ConvertTo-Json -Depth 3 -Compress
+            $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+            [System.IO.File]::WriteAllText($trackerConfigPath, $trackerCfg, $utf8NoBom)
+            Write-Success "Tracker configuration written to $trackerConfigPath"
+        }
+    } catch {
+        Write-Host "Warning: Failed to write tracker-config.json: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+
+Write-Host 'Close and reopen your terminal and IDE sessions to use easylife-ai.' -ForegroundColor Yellow
+
+if ($needLogin) {
+    Write-Host ''
+    Write-Host 'Launching login...'
+    & $finalExe login
+}
