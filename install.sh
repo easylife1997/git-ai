@@ -47,14 +47,6 @@ GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 NC='\033[0m' # No Color
 
-# GitHub repository details
-# Replaced during release builds with the actual repository (e.g., "easylife88-2026/easylife-ai")
-# When set to __REPO_PLACEHOLDER__, defaults to "easylife88-2026/easylife-ai"
-REPO="__REPO_PLACEHOLDER__"
-if [ "$REPO" = "__REPO_PLACEHOLDER__" ]; then
-    REPO="easylife1997/easylife-ai"
-fi
-
 # Version placeholder - replaced during release builds with actual version (e.g., "v1.0.24")
 # When set to __VERSION_PLACEHOLDER__, defaults to "latest"
 PINNED_VERSION="__VERSION_PLACEHOLDER__"
@@ -75,10 +67,10 @@ INSTALL_DIR="$HOME/.easylife-ai/bin"
 
 # 自动更新服务端地址：客户端检查新版本时访问的 URL
 # 私有化部署时改为内部服务器地址（如 https://your-internal-server.com）
-UPDATE_RELEASE_URL_DEFAULT="https://github.com/easylife1997/easylife-ai/releases"
+UPDATE_RELEASE_URL_DEFAULT="http://192.168.110.18:5173/client"
 
 # 稳定版更新目标版本：每次发布时手动更新，格式为 x.y.z
-UPDATE_RELEASE_VERSION_DEFAULT="1.0.6"
+UPDATE_RELEASE_VERSION_DEFAULT="1.0.9"
 
 # 自动更新检查间隔（秒）：默认 86400 秒（24 小时）
 # 设为更大的值可降低检查频率；设为 0 时客户端行为由 disable_auto_updates 控制
@@ -296,15 +288,15 @@ if [ -n "${EASYLIFE_AI_LOCAL_BINARY:-}" ]; then
 elif [ "$PINNED_VERSION" != "__VERSION_PLACEHOLDER__" ]; then
     # Version-pinned install script from a release
     RELEASE_TAG="$PINNED_VERSION"
-    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${BINARY_NAME}"
+    DOWNLOAD_URL="${UPDATE_RELEASE_URL_DEFAULT}/${RELEASE_TAG}/${BINARY_NAME}"
 elif [ -n "${EASYLIFE_AI_RELEASE_TAG:-}" ] && [ "${EASYLIFE_AI_RELEASE_TAG:-}" != "latest" ]; then
     # Environment variable override
     RELEASE_TAG="$EASYLIFE_AI_RELEASE_TAG"
-    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${BINARY_NAME}"
+    DOWNLOAD_URL="${UPDATE_RELEASE_URL_DEFAULT}/${RELEASE_TAG}/${BINARY_NAME}"
 else
     # Default to latest
     RELEASE_TAG="latest"
-    DOWNLOAD_URL="https://github.com/${REPO}/releases/latest/download/${BINARY_NAME}"
+    DOWNLOAD_URL="${UPDATE_RELEASE_URL_DEFAULT}/latest/${BINARY_NAME}"
 fi
 
 # Create directory if it doesn't exist

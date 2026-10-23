@@ -137,6 +137,23 @@ fn is_github_releases_url(url: &str) -> bool {
     url.contains("github.com") && url.contains("/releases")
 }
 
+/// Returns true when `url` points at a self-hosted client release server that
+/// serves the static layout `{base}/latest/install.sh` (base ends with `/client`),
+/// e.g. `http://host:5173/client`.
+///
+/// This layout behaves like the GitHub "stable" flow: the untagged installer is
+/// both the version metadata source and the installation artifact, so no
+/// `/worker/releases` endpoint or SHA256SUMS is involved.
+fn is_client_release_url(url: &str) -> bool {
+    !is_github_releases_url(url) && url.trim_end_matches('/').ends_with("/client")
+}
+
+/// Stable updates (GitHub or self-hosted client layout) use the untagged
+/// installer directly; prerelease channels never do.
+fn uses_stable_installer(url: &str, channel: UpdateChannel) -> bool {
+    (is_github_releases_url(url) || is_client_release_url(url)) && !channel_is_prerelease(channel)
+}
+
 /// Strip a trailing `/releases[/...]` suffix to get the repo root URL.
 ///
 /// `https://github.com/easylife1997/easylife-ai/releases`
@@ -184,7 +201,8 @@ fn parse_installer_release_version(script: &str) -> Result<String, String> {
     Ok(value)
 }
 
-fn github_install_script_name() -> &'static str {
+/// Installer script name published alongside each release.
+fn installer_script_name() -> &'static str {
     #[cfg(windows)]
     {
         "install.ps1"
@@ -197,8 +215,12 @@ fn github_install_script_name() -> &'static str {
 
 /// Download the untagged stable installer. Its version field is the release source of truth.
 fn fetch_github_stable_installer(repo_root: &str) -> Result<(ChannelRelease, String), String> {
-    let script_name = github_install_script_name();
-    let url = format!("{}/releases/latest/download/{}", repo_root, script_name);
+    let script_name = installer_script_name();
+    let url = if is_client_release_url(repo_root) {
+        format!("{}/latest/{}", repo_root.trim_end_matches('/'), script_name)
+    } else {
+        format!("{}/releases/latest/download/{}", repo_root, script_name)
+    };
     let (_agent, request) = ApiContext::http_get(&url, Some(30));
     let response = crate::http::send(request)
         .map_err(|e| format!("Failed to fetch {}: {}", script_name, e))?;
@@ -342,10 +364,7 @@ fn fetch_and_verify_install_script_github(
     tag: &str,
     checksums: &HashMap<String, String>,
 ) -> Result<String, String> {
-    #[cfg(windows)]
-    let script_name = "install.ps1";
-    #[cfg(not(windows))]
-    let script_name = "install.sh";
+    let script_name = installer_script_name();
 
     let expected_checksum = checksums
         .get(script_name)
@@ -645,10 +664,7 @@ fn fetch_and_verify_install_script(
     channel: &str,
     checksums: &HashMap<String, String>,
 ) -> Result<String, String> {
-    #[cfg(windows)]
-    let script_name = "install.ps1";
-    #[cfg(not(windows))]
-    let script_name = "install.sh";
+    let script_name = installer_script_name();
 
     let expected_checksum = checksums
         .get(script_name)
@@ -691,6 +707,17 @@ fn fetch_release_for_channel(
     if is_github_releases_url(api_base_url) {
         let repo_root = github_repo_root(api_base_url);
         return fetch_github_release_for_channel(repo_root, channel).map(|(release, _)| release);
+    }
+
+    if is_client_release_url(api_base_url) {
+        if channel_is_prerelease(channel) {
+            return Err(format!(
+                "Channel '{}' is not supported by the client release server; use the 'latest' channel",
+                channel.as_str()
+            ));
+        }
+        return fetch_github_stable_installer(api_base_url.trim_end_matches('/'))
+            .map(|(release, _)| release);
     }
 
     let context = ApiContext::new(Some(api_base_url.to_string())).with_timeout(5);
@@ -1009,8 +1036,7 @@ fn run_impl_with_url(
     // Stable GitHub updates use the untagged installer as both the version
     // metadata source and the installation artifact. No tag or SHA256SUMS is
     // involved in this path.
-    let script_content = if is_github_releases_url(api_base_url) && !channel_is_prerelease(channel)
-    {
+    let script_content = if uses_stable_installer(api_base_url, channel) {
         let repo_root = github_repo_root(api_base_url);
         match fetch_github_stable_installer(repo_root) {
             Ok((downloaded_release, content)) => {
@@ -1261,8 +1287,7 @@ pub fn check_and_install_update_if_available() -> Result<DaemonUpdateCheckResult
 
     // Stable GitHub updates use the untagged installer directly. Internal API
     // and prerelease GitHub channels retain SHA256SUMS verification.
-    let script_content = if is_github_releases_url(api_base_url) && !channel_is_prerelease(channel)
-    {
+    let script_content = if uses_stable_installer(api_base_url, channel) {
         let repo_root = github_repo_root(api_base_url);
         let (downloaded_release, content) = fetch_github_stable_installer(repo_root)?;
         if downloaded_release.semver != release.semver {
@@ -1417,6 +1442,49 @@ mod tests {
         unsafe {
             std::env::remove_var("GIT_AI_TEST_CACHE_DIR");
         }
+    }
+
+    #[test]
+    fn test_is_client_release_url() {
+        assert!(is_client_release_url("http://192.168.110.18:5173/client"));
+        assert!(is_client_release_url("http://192.168.110.18:5173/client/"));
+        assert!(is_client_release_url("https://example.com/client"));
+        // GitHub URLs and internal-API base URLs must not be treated as client layout.
+        assert!(!is_client_release_url(
+            "https://github.com/easylife1997/easylife-ai/releases"
+        ));
+        assert!(!is_client_release_url("https://usegitai.com"));
+        assert!(!is_client_release_url(
+            "http://192.168.110.18:5173/ai-code-boost/client-release/releases"
+        ));
+        assert!(!is_client_release_url("http://host/myclient"));
+    }
+
+    #[test]
+    fn test_installer_script_name() {
+        #[cfg(windows)]
+        assert_eq!(installer_script_name(), "install.ps1");
+        #[cfg(not(windows))]
+        assert_eq!(installer_script_name(), "install.sh");
+    }
+
+    #[test]
+    fn test_uses_stable_installer() {
+        let client = "http://192.168.110.18:5173/client";
+        let github = "https://github.com/easylife1997/easylife-ai/releases";
+        let internal = "https://usegitai.com";
+
+        assert!(uses_stable_installer(client, UpdateChannel::Latest));
+        assert!(uses_stable_installer(github, UpdateChannel::Latest));
+        assert!(!uses_stable_installer(client, UpdateChannel::Next));
+        assert!(!uses_stable_installer(internal, UpdateChannel::Latest));
+    }
+
+    #[test]
+    fn test_client_release_url_rejects_prerelease_channel() {
+        let err = fetch_release_for_channel("http://127.0.0.1:1/client", UpdateChannel::Next)
+            .unwrap_err();
+        assert!(err.contains("not supported"), "unexpected error: {err}");
     }
 
     #[test]

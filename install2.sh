@@ -75,10 +75,10 @@ INSTALL_DIR="$HOME/.easylife-ai/bin"
 
 # 自动更新服务端地址：客户端检查新版本时访问的 URL
 # 私有化部署时改为内部服务器地址（如 https://your-internal-server.com）
-UPDATE_RELEASE_URL_DEFAULT="http://192.168.110.18:5173/ai-code-boost/client-release/releases"
+UPDATE_RELEASE_URL_DEFAULT="https://github.com/easylife1997/easylife-ai/releases"
 
 # 稳定版更新目标版本：每次发布时手动更新，格式为 x.y.z
-UPDATE_RELEASE_VERSION_DEFAULT="1.0.6"
+UPDATE_RELEASE_VERSION_DEFAULT="1.0.8"
 
 # 自动更新检查间隔（秒）：默认 86400 秒（24 小时）
 # 设为更大的值可降低检查频率；设为 0 时客户端行为由 disable_auto_updates 控制
@@ -296,15 +296,15 @@ if [ -n "${EASYLIFE_AI_LOCAL_BINARY:-}" ]; then
 elif [ "$PINNED_VERSION" != "__VERSION_PLACEHOLDER__" ]; then
     # Version-pinned install script from a release
     RELEASE_TAG="$PINNED_VERSION"
-    DOWNLOAD_URL="${UPDATE_RELEASE_URL_DEFAULT}/${RELEASE_TAG}/download/${BINARY_NAME}"
+    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${BINARY_NAME}"
 elif [ -n "${EASYLIFE_AI_RELEASE_TAG:-}" ] && [ "${EASYLIFE_AI_RELEASE_TAG:-}" != "latest" ]; then
     # Environment variable override
     RELEASE_TAG="$EASYLIFE_AI_RELEASE_TAG"
-    DOWNLOAD_URL="${UPDATE_RELEASE_URL_DEFAULT}/${RELEASE_TAG}/download/${BINARY_NAME}"
+    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${BINARY_NAME}"
 else
     # Default to latest
     RELEASE_TAG="latest"
-    DOWNLOAD_URL="${UPDATE_RELEASE_URL_DEFAULT}/latest/download/${BINARY_NAME}"
+    DOWNLOAD_URL="https://github.com/${REPO}/releases/latest/download/${BINARY_NAME}"
 fi
 
 # Create directory if it doesn't exist

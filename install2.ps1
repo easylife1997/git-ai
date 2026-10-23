@@ -229,10 +229,10 @@ $InstallDir = Join-Path $HOME '.easylife-ai\bin'
 
 # 自动更新服务端地址：客户端检查新版本时访问的 URL
 # 私有化部署时改为内部服务器地址（如 https://your-internal-server.com）
-$UpdateReleaseUrl = 'http://192.168.110.18:5173/ai-code-boost/client-release/releases'
+$UpdateReleaseUrl = 'https://github.com/easylife1997/easylife-ai/releases'
 
 # 稳定版更新目标版本：每次发布时手动更新，格式为 x.y.z
-$UpdateReleaseVersion = '1.0.6'
+$UpdateReleaseVersion = '1.0.8'
 
 # 自动更新检查间隔（秒）：默认 86400 秒（24 小时）
 # 设为更大的值可降低检查频率；设为 0 时客户端行为由 DisableAutoUpdates 控制
@@ -416,16 +416,16 @@ if (-not [string]::IsNullOrWhiteSpace($env:EASYLIFE_AI_LOCAL_BINARY)) {
     $releaseTag = 'local'
 } elseif ($PinnedVersion -ne '__VERSION_PLACEHOLDER__') {
     $releaseTag = $PinnedVersion
-    $downloadUrlExe = "$UpdateReleaseUrl/$releaseTag/download/$binaryName.exe"
-    $downloadUrlNoExt = "$UpdateReleaseUrl/$releaseTag/download/$binaryName"
+    $downloadUrlExe = "https://github.com/$Repo/releases/download/$releaseTag/$binaryName.exe"
+    $downloadUrlNoExt = "https://github.com/$Repo/releases/download/$releaseTag/$binaryName"
 } elseif (-not [string]::IsNullOrWhiteSpace($env:EASYLIFE_AI_RELEASE_TAG) -and $env:EASYLIFE_AI_RELEASE_TAG -ne 'latest') {
     $releaseTag = $env:EASYLIFE_AI_RELEASE_TAG
-    $downloadUrlExe = "$UpdateReleaseUrl/$releaseTag/download/$binaryName.exe"
-    $downloadUrlNoExt = "$UpdateReleaseUrl/$releaseTag/download/$binaryName"
+    $downloadUrlExe = "https://github.com/$Repo/releases/download/$releaseTag/$binaryName.exe"
+    $downloadUrlNoExt = "https://github.com/$Repo/releases/download/$releaseTag/$binaryName"
 } else {
     $releaseTag = 'latest'
-    $downloadUrlExe = "$UpdateReleaseUrl/latest/download/$binaryName.exe"
-    $downloadUrlNoExt = "$UpdateReleaseUrl/latest/download/$binaryName"
+    $downloadUrlExe = "https://github.com/$Repo/releases/latest/download/$binaryName.exe"
+    $downloadUrlNoExt = "https://github.com/$Repo/releases/latest/download/$binaryName"
 }
 
 # Install directory: %USERPROFILE%\.easylife-ai\bin

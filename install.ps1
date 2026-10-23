@@ -201,14 +201,6 @@ function Verify-Checksum {
     Write-Success "Checksum verified for $BinaryName"
 }
 
-# GitHub repository details
-# Replaced during release builds with the actual repository (e.g., "easylife88-2026/easylife-ai")
-# When set to __REPO_PLACEHOLDER__, defaults to "easylife88-2026/easylife-ai"
-$Repo = '__REPO_PLACEHOLDER__'
-if ($Repo -eq '__REPO_PLACEHOLDER__') {
-    $Repo = 'easylife1997/easylife-ai'
-}
-
 # Version placeholder - replaced during release builds with actual version (e.g., "v1.0.24")
 # When set to __VERSION_PLACEHOLDER__, defaults to "latest"
 $PinnedVersion = '__VERSION_PLACEHOLDER__'
@@ -229,10 +221,10 @@ $InstallDir = Join-Path $HOME '.easylife-ai\bin'
 
 # 自动更新服务端地址：客户端检查新版本时访问的 URL
 # 私有化部署时改为内部服务器地址（如 https://your-internal-server.com）
-$UpdateReleaseUrl = 'https://github.com/easylife1997/easylife-ai/releases'
+$UpdateReleaseUrl = 'http://192.168.110.18:5173/client'
 
 # 稳定版更新目标版本：每次发布时手动更新，格式为 x.y.z
-$UpdateReleaseVersion = '1.0.6'
+$UpdateReleaseVersion = '1.0.9'
 
 # 自动更新检查间隔（秒）：默认 86400 秒（24 小时）
 # 设为更大的值可降低检查频率；设为 0 时客户端行为由 DisableAutoUpdates 控制
@@ -416,16 +408,16 @@ if (-not [string]::IsNullOrWhiteSpace($env:EASYLIFE_AI_LOCAL_BINARY)) {
     $releaseTag = 'local'
 } elseif ($PinnedVersion -ne '__VERSION_PLACEHOLDER__') {
     $releaseTag = $PinnedVersion
-    $downloadUrlExe = "https://github.com/$Repo/releases/download/$releaseTag/$binaryName.exe"
-    $downloadUrlNoExt = "https://github.com/$Repo/releases/download/$releaseTag/$binaryName"
+    $downloadUrlExe = "$UpdateReleaseUrl/$releaseTag/$binaryName.exe"
+    $downloadUrlNoExt = "$UpdateReleaseUrl/$releaseTag/$binaryName"
 } elseif (-not [string]::IsNullOrWhiteSpace($env:EASYLIFE_AI_RELEASE_TAG) -and $env:EASYLIFE_AI_RELEASE_TAG -ne 'latest') {
     $releaseTag = $env:EASYLIFE_AI_RELEASE_TAG
-    $downloadUrlExe = "https://github.com/$Repo/releases/download/$releaseTag/$binaryName.exe"
-    $downloadUrlNoExt = "https://github.com/$Repo/releases/download/$releaseTag/$binaryName"
+    $downloadUrlExe = "$UpdateReleaseUrl/$releaseTag/$binaryName.exe"
+    $downloadUrlNoExt = "$UpdateReleaseUrl/$releaseTag/$binaryName"
 } else {
     $releaseTag = 'latest'
-    $downloadUrlExe = "https://github.com/$Repo/releases/latest/download/$binaryName.exe"
-    $downloadUrlNoExt = "https://github.com/$Repo/releases/latest/download/$binaryName"
+    $downloadUrlExe = "$UpdateReleaseUrl/latest/$binaryName.exe"
+    $downloadUrlNoExt = "$UpdateReleaseUrl/latest/$binaryName"
 }
 
 # Install directory: %USERPROFILE%\.easylife-ai\bin
