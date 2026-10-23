@@ -33,7 +33,7 @@ pub fn handle_sync_prompts(args: &[String]) {
             }
             _ => {
                 eprintln!("Error: Unknown argument: {}", args[i]);
-                eprintln!("Usage: git-ai sync-prompts [--since <time>] [--workdir <path>]");
+                eprintln!("Usage: easylife-ai sync-prompts [--since <time>] [--workdir <path>]");
                 std::process::exit(1);
             }
         }

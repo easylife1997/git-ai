@@ -344,7 +344,7 @@ fn parse_session_id_arg(args: &[String]) -> Option<String> {
 /// Main entry point: `git-ai report-token-usage <platform>`
 pub fn handle_report_token_usage(args: &[String]) {
     if args.is_empty() {
-        eprintln!("Usage: git-ai report-token-usage <platform> [--session-id <id>]");
+        eprintln!("Usage: easylife-ai report-token-usage <platform> [--session-id <id>]");
         eprintln!("Platforms: claude-code, codex, opencode");
         std::process::exit(1);
     }

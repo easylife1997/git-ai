@@ -202,7 +202,7 @@ fn ops_removed_old_command_names_are_rejected() {
             .git_ai_with_env(&[old], &[("HOME", home.to_str().unwrap())])
             .expect_err("old command name must be rejected");
         assert!(
-            err.contains("Unknown git-ai command"),
+            err.contains("Unknown easylife-ai command"),
             "`{old}` should be reported as unknown, got:\n{err}"
         );
     }

@@ -449,7 +449,8 @@ impl OpenCodePreset {
             // data lives at ~/.local/share/opencode, not %APPDATA%\opencode.
             // Check the XDG path first, then fall back to the Windows-native locations
             // for older desktop-client installs.
-            let xdg_candidate = dirs::home_dir().map(|h| h.join(".local").join("share").join("opencode"));
+            let xdg_candidate =
+                dirs::home_dir().map(|h| h.join(".local").join("share").join("opencode"));
             if let Some(p) = xdg_candidate {
                 if p.join("opencode.db").exists() || p.exists() {
                     return Ok(p);
@@ -471,7 +472,9 @@ impl OpenCodePreset {
             // even when the directory does not yet exist (first run).
             dirs::home_dir()
                 .map(|h| h.join(".local").join("share").join("opencode"))
-                .ok_or_else(|| GitAiError::Generic("Could not determine home directory".to_string()))
+                .ok_or_else(|| {
+                    GitAiError::Generic("Could not determine home directory".to_string())
+                })
         }
 
         #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]

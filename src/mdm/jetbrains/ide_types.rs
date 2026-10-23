@@ -165,4 +165,21 @@ impl DetectedIde {
             .map(|build| build >= MIN_INTELLIJ_BUILD)
             .unwrap_or(false)
     }
+
+    /// Return the IDE's user config options directory, e.g.
+    /// `~/Library/Application Support/JetBrains/IntelliJIdea2025.2/options` (macOS/Windows)
+    /// or `~/.config/JetBrains/IntelliJIdea2025.2/options` (Linux).
+    ///
+    /// The plugins_dir for macOS/Windows ends with "plugins"; for Linux it is the version
+    /// directory itself. In both cases the options dir is a sibling/child called "options".
+    pub fn options_dir(&self) -> std::path::PathBuf {
+        let plugins = &self.plugins_dir;
+        if plugins.file_name().map(|n| n == "plugins").unwrap_or(false) {
+            // macOS / Windows: .../IntelliJIdea2025.2/plugins -> .../IntelliJIdea2025.2/options
+            plugins.parent().unwrap_or(plugins).join("options")
+        } else {
+            // Linux: .../IntelliJIdea2025.2 -> .../IntelliJIdea2025.2/options
+            plugins.join("options")
+        }
+    }
 }

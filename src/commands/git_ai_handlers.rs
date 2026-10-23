@@ -102,11 +102,7 @@ pub fn handle_git_ai(args: &[String]) {
             print_help();
         }
         "version" | "--version" | "-v" => {
-            if cfg!(debug_assertions) {
-                println!("{} (debug)", env!("CARGO_PKG_VERSION"));
-            } else {
-                println!(env!("CARGO_PKG_VERSION"));
-            }
+            println!("{}", config::Config::get().update_release_version());
             std::process::exit(0);
         }
         "config" => {
@@ -405,7 +401,7 @@ pub fn handle_git_ai(args: &[String]) {
             commands::legacy_cleanup::handle_legacy_cleanup(&args[1..]);
         }
         _ => {
-            println!("Unknown git-ai command: {}", args[0]);
+            println!("Unknown easylife-ai command: {}", args[0]);
             std::process::exit(1);
         }
     }
@@ -414,7 +410,7 @@ pub fn handle_git_ai(args: &[String]) {
 fn print_help() {
     eprintln!("easylife-ai - git proxy with AI authorship tracking");
     eprintln!();
-    eprintln!("Usage: git-ai <command> [args...]");
+    eprintln!("Usage: easylife-ai <command> [args...]");
     eprintln!();
     eprintln!("Commands:");
     eprintln!("  checkpoint         Checkpoint working changes and attribute author");
@@ -459,16 +455,16 @@ fn print_help() {
         "                          Formats: '1d', '2h', '1w', Unix timestamp, ISO8601, YYYY-MM-DD"
     );
     eprintln!("    --workdir <path>      Only sync prompts from specific repository");
-    eprintln!("  config             View and manage git-ai configuration");
+    eprintln!("  config             View and manage easylife-ai configuration");
     eprintln!("                        Show all config as formatted JSON");
     eprintln!("    <key>                 Show specific config value (supports dot notation)");
     eprintln!("    set <key> <value>     Set a config value (arrays: single value = [value])");
     eprintln!("    --add <key> <value>   Add to array or upsert into object");
     eprintln!("    unset <key>           Remove config value (reverts to default)");
     eprintln!("  debug              Print support/debug diagnostics");
-    eprintln!("  bg                 Run and control git-ai background service");
+    eprintln!("  bg                 Run and control easylife-ai background service");
     eprintln!("  install-hooks      Install git hooks for AI authorship tracking");
-    eprintln!("  uninstall-hooks    Remove git-ai hooks from all detected tools");
+    eprintln!("  uninstall-hooks    Remove easylife-ai hooks from all detected tools");
     eprintln!("  ci                 Continuous integration utilities");
     eprintln!("    github                 GitHub CI helpers");
     eprintln!("  squash-authorship  Generate authorship log for squashed commits");
@@ -543,7 +539,7 @@ fn print_help() {
     eprintln!("    (no flag)             Report only; changes nothing");
     eprintln!("    --yes                 Stop the old background service and rename the directory");
     eprintln!("    --purge               Delete an already-renamed legacy directory");
-    eprintln!("  version, -v, --version     Print the git-ai version");
+    eprintln!("  version, -v, --version     Print the easylife-ai version");
     eprintln!("  help, -h, --help           Show this help message");
     eprintln!();
     std::process::exit(0);
@@ -1901,7 +1897,10 @@ struct PushAuthorshipNotesResponse {
 
 fn parse_machine_json_arg(args: &[String], command: &str) -> Result<String, String> {
     if args.len() != 2 || args[0] != "--json" {
-        return Err(format!("Usage: git-ai {} --json '<json-payload>'", command));
+        return Err(format!(
+            "Usage: easylife-ai {} --json '<json-payload>'",
+            command
+        ));
     }
 
     let payload = strip_utf8_bom(args[1].clone());
@@ -2328,7 +2327,7 @@ fn handle_git_hooks(args: &[String]) {
         }
         _ => {
             eprintln!("The git core hooks feature has been sunset.");
-            eprintln!("Usage: git-ai git-hooks remove");
+            eprintln!("Usage: easylife-ai git-hooks remove");
             std::process::exit(1);
         }
     }
@@ -2353,7 +2352,7 @@ fn get_all_files_for_mock_ai(working_dir: &str) -> Vec<String> {
 fn handle_show_transcript(args: &[String]) {
     if args.len() < 2 {
         eprintln!("Error: show-transcript requires agent name and path/id");
-        eprintln!("Usage: git-ai show-transcript <agent> <path|id>");
+        eprintln!("Usage: easylife-ai show-transcript <agent> <path|id>");
         eprintln!(
             "  Agents: claude, codex, gemini, continue-cli, github-copilot, cursor, amp, windsurf"
         );

@@ -914,7 +914,7 @@ pub fn run_with_args(args: &[String]) {
             "--background" => background = true, // Undocumented flag for internal use when spawning background process
             _ => {
                 eprintln!("Unknown argument: {}", arg);
-                eprintln!("Usage: git-ai upgrade [--force]");
+                eprintln!("Usage: easylife-ai upgrade [--force]");
                 std::process::exit(1);
             }
         }

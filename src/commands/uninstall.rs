@@ -23,6 +23,77 @@ fn remove_path(path: &Path, dry_run: bool) -> Result<bool, GitAiError> {
     Ok(true)
 }
 
+/// Like `remove_path`, but on Windows a path that is still locked (typically the
+/// running executable itself) is queued for deletion after this process exits
+/// instead of aborting the whole uninstall.
+fn remove_or_defer(
+    path: &Path,
+    dry_run: bool,
+    deferred: &mut Vec<PathBuf>,
+) -> Result<bool, GitAiError> {
+    match remove_path(path, dry_run) {
+        Err(GitAiError::IoError(error)) if cfg!(windows) => {
+            println!(
+                "Could not remove {} now ({}); it will be removed after this process exits",
+                path.display(),
+                error
+            );
+            deferred.push(path.to_path_buf());
+            Ok(true)
+        }
+        other => other,
+    }
+}
+
+#[cfg(windows)]
+fn schedule_delete_after_exit(paths: &[PathBuf]) {
+    use std::os::windows::process::CommandExt;
+
+    if paths.is_empty() {
+        return;
+    }
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+
+    let list = paths
+        .iter()
+        .map(|path| format!("'{}'", path.display().to_string().replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(",");
+    let script = format!(
+        "Wait-Process -Id {pid} -ErrorAction SilentlyContinue; \
+         foreach ($p in @({list})) {{ \
+           for ($i = 0; $i -lt 40; $i++) {{ \
+             Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue; \
+             if (-not (Test-Path -LiteralPath $p)) {{ break }}; \
+             Start-Sleep -Milliseconds 500 \
+           }} \
+         }}",
+        pid = std::process::id(),
+        list = list
+    );
+    let spawned = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &script,
+        ])
+        .creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP)
+        .spawn();
+    match spawned {
+        Ok(child) => println!("Scheduled deferred removal (helper pid {})", child.id()),
+        Err(error) => eprintln!(
+            "Warning: could not schedule deferred removal ({}); delete these manually: {}",
+            error, list
+        ),
+    }
+}
+
+#[cfg(not(windows))]
+fn schedule_delete_after_exit(_paths: &[PathBuf]) {}
+
 fn stop_daemon() {
     if let Ok(daemon_config) = crate::daemon::DaemonConfig::from_env_or_default_paths() {
         let _ =
@@ -190,8 +261,9 @@ pub fn run(args: &[String]) -> Result<(), GitAiError> {
         eprintln!("Warning: failed to remove some hooks: {}", error);
     }
 
+    let mut deferred: Vec<PathBuf> = Vec::new();
     for path in managed_binary_paths()? {
-        let _ = remove_path(&path, dry_run)?;
+        let _ = remove_or_defer(&path, dry_run, &mut deferred)?;
     }
 
     cleanup_shell_profiles(dry_run)?;
@@ -207,14 +279,15 @@ pub fn run(args: &[String]) -> Result<(), GitAiError> {
         GitAiError::Generic("Could not determine application directory".to_string())
     })?;
     if purge && !keep_config {
-        remove_path(&app, dry_run)?;
+        remove_or_defer(&app, dry_run, &mut deferred)?;
     } else {
         for path in [app.join("internal"), app.join("tmp"), app.join("skills")] {
-            let _ = remove_path(&path, dry_run)?;
+            let _ = remove_or_defer(&path, dry_run, &mut deferred)?;
         }
     }
 
     if !dry_run {
+        schedule_delete_after_exit(&deferred);
         if purge && !keep_config {
             println!(
                 "easylife-ai uninstall completed. Configuration, data, and backups were removed."

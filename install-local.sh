@@ -41,7 +41,7 @@ INSTALL_DIR="$HOME/.easylife-ai/bin"
 UPDATE_RELEASE_URL_DEFAULT="https://github.com/easylife1997/easylife-ai/releases"
 
 # 稳定版更新目标版本：每次发布时手动更新，格式为 x.y.z
-UPDATE_RELEASE_VERSION_DEFAULT="1.0.1"
+UPDATE_RELEASE_VERSION_DEFAULT="1.0.6"
 
 # 自动更新检查间隔（秒）：默认 86400 秒（24 小时）
 # 设为更大的值可降低检查频率；设为 0 时客户端行为由 disable_auto_updates 控制
