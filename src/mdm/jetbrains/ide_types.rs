@@ -178,8 +178,20 @@ impl DetectedIde {
             // macOS / Windows: .../IntelliJIdea2025.2/plugins -> .../IntelliJIdea2025.2/options
             plugins.parent().unwrap_or(plugins).join("options")
         } else {
-            // Linux: .../IntelliJIdea2025.2 -> .../IntelliJIdea2025.2/options
-            plugins.join("options")
+            // Linux: plugins live in ~/.local/share/<vendor>/<version>, but user config
+            // (including options/) lives in ~/.config/<vendor>/<version>.
+            let vendor = plugins
+                .parent()
+                .and_then(|p| p.file_name())
+                .unwrap_or_else(|| std::ffi::OsStr::new("JetBrains"));
+            match plugins.file_name() {
+                Some(version) => crate::mdm::utils::home_dir()
+                    .join(".config")
+                    .join(vendor)
+                    .join(version)
+                    .join("options"),
+                None => plugins.join("options"),
+            }
         }
     }
 }

@@ -911,7 +911,10 @@ async fn async_run_uninstall(
                     continue;
                 }
 
-                if !check_result.hooks_installed {
+                // Tools without config-file hooks (e.g. JetBrains) always report
+                // `hooks_installed: false`, but still have extras to undo.
+                let config_hooks = installer.uses_config_hooks();
+                if config_hooks && !check_result.hooks_installed {
                     statuses.insert(id.to_string(), InstallStatus::NotFound);
                     continue;
                 }
@@ -919,31 +922,33 @@ async fn async_run_uninstall(
                 any_checked = true;
 
                 // Uninstall hooks
-                let spinner = Spinner::new(&format!("{}: removing hooks", name));
-                spinner.start();
+                if config_hooks {
+                    let spinner = Spinner::new(&format!("{}: removing hooks", name));
+                    spinner.start();
 
-                match installer.uninstall_hooks(params, dry_run) {
-                    Ok(Some(diff)) => {
-                        if dry_run {
-                            spinner.pending(&format!("{}: Pending removal", name));
-                        } else {
-                            spinner.success(&format!("{}: Hooks removed", name));
+                    match installer.uninstall_hooks(params, dry_run) {
+                        Ok(Some(diff)) => {
+                            if dry_run {
+                                spinner.pending(&format!("{}: Pending removal", name));
+                            } else {
+                                spinner.success(&format!("{}: Hooks removed", name));
+                            }
+                            if verbose {
+                                println!();
+                                print_diff(&diff);
+                            }
+                            has_changes = true;
+                            statuses.insert(id.to_string(), InstallStatus::Installed);
                         }
-                        if verbose {
-                            println!();
-                            print_diff(&diff);
+                        Ok(None) => {
+                            spinner.success(&format!("{}: No hooks to remove", name));
+                            statuses.insert(id.to_string(), InstallStatus::AlreadyInstalled);
                         }
-                        has_changes = true;
-                        statuses.insert(id.to_string(), InstallStatus::Installed);
-                    }
-                    Ok(None) => {
-                        spinner.success(&format!("{}: No hooks to remove", name));
-                        statuses.insert(id.to_string(), InstallStatus::AlreadyInstalled);
-                    }
-                    Err(e) => {
-                        spinner.error(&format!("{}: Failed to remove hooks", name));
-                        eprintln!("  Error: {}", e);
-                        statuses.insert(id.to_string(), InstallStatus::NotFound);
+                        Err(e) => {
+                            spinner.error(&format!("{}: Failed to remove hooks", name));
+                            eprintln!("  Error: {}", e);
+                            statuses.insert(id.to_string(), InstallStatus::NotFound);
+                        }
                     }
                 }
 

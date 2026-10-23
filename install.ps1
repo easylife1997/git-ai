@@ -232,7 +232,7 @@ $InstallDir = Join-Path $HOME '.easylife-ai\bin'
 $UpdateReleaseUrl = 'https://github.com/easylife1997/easylife-ai/releases'
 
 # 稳定版更新目标版本：每次发布时手动更新，格式为 x.y.z
-$UpdateReleaseVersion = '1.0.7'
+$UpdateReleaseVersion = '1.0.6'
 
 # 自动更新检查间隔（秒）：默认 86400 秒（24 小时）
 # 设为更大的值可降低检查频率；设为 0 时客户端行为由 DisableAutoUpdates 控制

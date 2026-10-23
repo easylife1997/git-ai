@@ -3,9 +3,10 @@ use crate::mdm::hook_installer::{
     HookCheckResult, HookInstaller, HookInstallerParams, InstallResult, UninstallResult,
 };
 use crate::mdm::jetbrains::{
-    DetectedIde, MARKETPLACE_URL, MIN_INTELLIJ_BUILD, PLUGIN_ID, download_plugin_from_marketplace,
-    find_jetbrains_installations, install_plugin_to_directory, install_plugin_via_cli,
-    is_plugin_installed, restore_jetbrains_git_xml, update_jetbrains_git_xml,
+    DetectedIde, MARKETPLACE_URL, MIN_INTELLIJ_BUILD, PLUGIN_ID, default_backup_path,
+    download_plugin_from_marketplace, find_jetbrains_installations, install_plugin_to_directory,
+    install_plugin_via_cli, is_plugin_installed, restore_jetbrains_git_xml,
+    update_jetbrains_git_xml,
 };
 pub struct JetBrainsInstaller;
 
@@ -21,16 +22,25 @@ impl JetBrainsInstaller {
 
         // Always ensure the git path setting points to our shim, regardless of plugin state.
         let options_dir = detected.options_dir();
-        let git_path_result = update_jetbrains_git_xml(&options_dir, dry_run);
-        let git_path_diff = match git_path_result {
-            Ok(diff) => diff,
+        let git_path_result =
+            update_jetbrains_git_xml(&options_dir, &default_backup_path(), dry_run);
+        let (git_path_diff, git_path_warning) = match git_path_result {
+            Ok(diff) => (diff, None),
             Err(e) => {
                 tracing::debug!(
                     "JetBrains: Failed to update git.xml for {}: {}",
                     ide_name,
                     e
                 );
-                None
+                (
+                    None,
+                    Some(format!(
+                        "{}: Could not set the Git executable in {} ({}). Set it manually to ~/.easylife-ai/bin/git in Settings > Version Control > Git.",
+                        ide_name,
+                        options_dir.join("git.xml").display(),
+                        e
+                    )),
+                )
             }
         };
 
@@ -39,7 +49,8 @@ impl JetBrainsInstaller {
             return InstallResult {
                 changed: git_path_diff.is_some(),
                 diff: git_path_diff,
-                message: format!("{}: Plugin already installed", ide_name),
+                message: git_path_warning
+                    .unwrap_or_else(|| format!("{}: Plugin already installed", ide_name)),
             };
         }
 
@@ -263,7 +274,7 @@ impl HookInstaller for JetBrainsInstaller {
         for detected in &installations {
             // Restore git.xml regardless of plugin state.
             let options_dir = detected.options_dir();
-            match restore_jetbrains_git_xml(&options_dir, dry_run) {
+            match restore_jetbrains_git_xml(&options_dir, &default_backup_path(), dry_run) {
                 Ok(Some(diff)) => {
                     results.push(UninstallResult {
                         changed: true,
