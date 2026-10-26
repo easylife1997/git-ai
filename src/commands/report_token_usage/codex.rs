@@ -42,6 +42,10 @@ fn parse_turns_from_content(content: &str) -> Vec<CodexTurn> {
     let mut turn_order: Vec<String> = Vec::new();
     let mut turn_started_at: HashMap<String, String> = HashMap::new();
     let mut turn_completed_at: HashMap<String, String> = HashMap::new();
+    // Timestamp of the latest event seen while a turn was active. Codex writes
+    // `task_complete` only after the Stop hook exits, so a hook-time read never
+    // sees it; this stands in for the completion time.
+    let mut turn_last_event_at: HashMap<String, String> = HashMap::new();
     let mut aborted_turns: HashMap<String, bool> = HashMap::new();
     let mut active_turn: Option<String> = None;
     let mut legacy_user_messages: HashMap<String, String> = HashMap::new();
@@ -63,6 +67,10 @@ fn parse_turns_from_content(content: &str) -> Vec<CodexTurn> {
             .get("timestamp")
             .and_then(|t| t.as_str())
             .map(|s| s.to_string());
+
+        if let (Some(turn_id), Some(ts)) = (active_turn.as_ref(), line_ts.as_ref()) {
+            turn_last_event_at.insert(turn_id.clone(), ts.clone());
+        }
 
         match event_type {
             "event_msg" => {
@@ -413,7 +421,10 @@ fn parse_turns_from_content(content: &str) -> Vec<CodexTurn> {
                 .map(|index| index as i64 + 1)
                 .unwrap_or(turns.len() as i64 + 1),
             started_at: turn_started_at.get(turn_id).cloned(),
-            completed_at: turn_completed_at.get(turn_id).cloned(),
+            completed_at: turn_completed_at
+                .get(turn_id)
+                .or_else(|| turn_last_event_at.get(turn_id))
+                .cloned(),
         });
     }
 
@@ -726,6 +737,23 @@ mod tests {
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].user_content, "next prompt");
         assert_eq!(turns[0].assistant_text, "next answer");
+    }
+
+    #[test]
+    fn turn_without_task_complete_falls_back_to_last_event_time() {
+        // A Stop-hook read: Codex writes task_complete only after the hook exits.
+        let content = rollout(&[
+            json!({"timestamp":"2026-02-11T05:53:33.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}),
+            json!({"timestamp":"2026-02-11T05:53:33.100Z","type":"turn_context","payload":{"turn_id":"t1","model":"m"}}),
+            json!({"timestamp":"2026-02-11T05:53:34.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}}),
+            json!({"timestamp":"2026-02-11T05:53:36.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12}}}}),
+        ]);
+        let turns = parse_turns_from_content(&content);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(
+            turns[0].completed_at.as_deref(),
+            Some("2026-02-11T05:53:36.000Z")
+        );
     }
 
     #[test]
