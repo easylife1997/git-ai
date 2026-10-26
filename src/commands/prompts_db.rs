@@ -117,7 +117,7 @@ pub fn handle_prompts(args: &[String]) {
         arg if arg.starts_with('-') => handle_populate(args), // flags for populate
         _ => {
             eprintln!("Unknown subcommand: {}", args[0]);
-            eprintln!("Usage: git-ai prompts [exec|list|next|count|reset] [options]");
+            eprintln!("Usage: easylife-ai prompts [exec|list|next|count|reset] [options]");
             std::process::exit(1);
         }
     }
@@ -274,7 +274,7 @@ fn handle_populate(args: &[String]) {
 fn handle_exec(args: &[String]) {
     if args.is_empty() {
         eprintln!("Error: exec requires a SQL statement");
-        eprintln!("Usage: git-ai prompts exec \"<SQL>\"");
+        eprintln!("Usage: easylife-ai prompts exec \"<SQL>\"");
         std::process::exit(1);
     }
 

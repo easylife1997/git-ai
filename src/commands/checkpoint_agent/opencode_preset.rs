@@ -445,15 +445,36 @@ impl OpenCodePreset {
 
         #[cfg(target_os = "windows")]
         {
-            if let Ok(app_data) = std::env::var("APPDATA") {
-                Ok(PathBuf::from(app_data).join("opencode"))
-            } else if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-                Ok(PathBuf::from(local_app_data).join("opencode"))
-            } else {
-                Err(GitAiError::Generic(
-                    "Neither APPDATA nor LOCALAPPDATA is set".to_string(),
-                ))
+            // OpenCode CLI uses XDG conventions on all platforms, including Windows:
+            // data lives at ~/.local/share/opencode, not %APPDATA%\opencode.
+            // Check the XDG path first, then fall back to the Windows-native locations
+            // for older desktop-client installs.
+            let xdg_candidate =
+                dirs::home_dir().map(|h| h.join(".local").join("share").join("opencode"));
+            if let Some(p) = xdg_candidate {
+                if p.join("opencode.db").exists() || p.exists() {
+                    return Ok(p);
+                }
             }
+            if let Ok(app_data) = std::env::var("APPDATA") {
+                let p = PathBuf::from(app_data).join("opencode");
+                if p.join("opencode.db").exists() || p.exists() {
+                    return Ok(p);
+                }
+            }
+            if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+                let p = PathBuf::from(local_app_data).join("opencode");
+                if p.join("opencode.db").exists() || p.exists() {
+                    return Ok(p);
+                }
+            }
+            // Fall back to XDG path unconditionally so callers get a usable path
+            // even when the directory does not yet exist (first run).
+            dirs::home_dir()
+                .map(|h| h.join(".local").join("share").join("opencode"))
+                .ok_or_else(|| {
+                    GitAiError::Generic("Could not determine home directory".to_string())
+                })
         }
 
         #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]

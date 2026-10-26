@@ -163,7 +163,7 @@ pub fn handle_config(args: &[String]) {
     if filtered_args.is_empty() {
         // Show all config if only --add was passed (which doesn't make sense)
         eprintln!("Error: --add requires <key> <value>");
-        eprintln!("Usage: git-ai config --add <key> <value>");
+        eprintln!("Usage: easylife-ai config --add <key> <value>");
         eprintln!("   or: git-ai config set <key> <value> --add");
         std::process::exit(1);
     }
@@ -172,7 +172,7 @@ pub fn handle_config(args: &[String]) {
         "set" => {
             if filtered_args.len() < 3 {
                 eprintln!("Error: set requires <key> <value>");
-                eprintln!("Usage: git-ai config set <key> <value>");
+                eprintln!("Usage: easylife-ai config set <key> <value>");
                 std::process::exit(1);
             }
             let key = filtered_args[1].as_str();
@@ -185,7 +185,7 @@ pub fn handle_config(args: &[String]) {
         "unset" => {
             if filtered_args.len() < 2 {
                 eprintln!("Error: unset requires <key>");
-                eprintln!("Usage: git-ai config unset <key>");
+                eprintln!("Usage: easylife-ai config unset <key>");
                 std::process::exit(1);
             }
             let key = filtered_args[1].as_str();
@@ -199,7 +199,7 @@ pub fn handle_config(args: &[String]) {
                 // git-ai config --add <key> <value>
                 if filtered_args.len() < 2 {
                     eprintln!("Error: --add requires <key> <value>");
-                    eprintln!("Usage: git-ai config --add <key> <value>");
+                    eprintln!("Usage: easylife-ai config --add <key> <value>");
                     std::process::exit(1);
                 }
                 let value = filtered_args[1].as_str();

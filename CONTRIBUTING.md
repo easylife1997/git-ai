@@ -39,7 +39,7 @@ task dev
 
 If `~/.easylife-ai` isn't set up yet, the script will run the installer automatically first.
 
-The script also writes `disable_auto_updates=true` and `disable_version_checks=true` into `~/.easylife-ai/config.json`. Without this, the daemon's auto-updater replaces the dev build with the published release within the check interval, because the release carries a higher semver. A replaced build reports `Unknown git-ai command: <subcommand>` for every subcommand added since that release, and — because `install` wipes and rewrites `~/.easylife-ai/skills/` — it also deletes any skill that release does not embed. Re-run `task dev` if you see either symptom.
+The script also writes `disable_auto_updates=true` and `disable_version_checks=true` into `~/.easylife-ai/config.json`. Without this, the daemon's auto-updater replaces the dev build with the published release within the check interval, because the release carries a higher semver. A replaced build reports `Unknown easylife-ai command: <subcommand>` for every subcommand added since that release, and — because `install` wipes and rewrites `~/.easylife-ai/skills/` — it also deletes any skill that release does not embed. Re-run `task dev` if you see either symptom.
 
 This guards the *automatic* path only: running `easylife-ai upgrade` by hand still fetches and installs the release.
 

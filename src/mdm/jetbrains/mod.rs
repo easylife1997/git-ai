@@ -1,9 +1,12 @@
 pub mod detection;
 pub mod download;
+pub mod git_config;
+pub mod git_xml;
 pub mod ide_types;
 
 pub use detection::{find_jetbrains_installations, is_plugin_installed};
 pub use download::{
     download_plugin_from_marketplace, install_plugin_to_directory, install_plugin_via_cli,
 };
+pub use git_config::{default_backup_path, restore_jetbrains_git_xml, update_jetbrains_git_xml};
 pub use ide_types::{DetectedIde, MARKETPLACE_URL, MIN_INTELLIJ_BUILD, PLUGIN_ID};

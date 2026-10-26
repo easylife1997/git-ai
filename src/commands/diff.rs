@@ -204,7 +204,7 @@ struct DiffBuildArtifacts {
 pub fn handle_diff(repo: &Repository, args: &[String]) -> Result<(), GitAiError> {
     if args.is_empty() {
         eprintln!("Error: diff requires a commit or commit range argument");
-        eprintln!("Usage: git-ai diff <commit>");
+        eprintln!("Usage: easylife-ai diff <commit>");
         eprintln!("       git-ai diff <commit1>..<commit2>");
         std::process::exit(1);
     }

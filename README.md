@@ -432,5 +432,5 @@ easylife-ai ops-check   # 打印一段交给 AI 智能体的排查 prompt（自�
 | 重复上报 | note 丢失 | `git notes --ref=ai-tracker add -m "reported" <sha>` |
 | 正常 commit 被过滤 | 行数超过阈值 | 分批提交 |
 | 日志中大量 `已上报过` | 正常现象，push 时扫描了已上报的历史 commit | 无需处理 |
-| `Unknown git-ai command: doctor` | 本地构建被线上 release 覆盖 | 重跑 `task dev`；`scripts/dev.sh` 已自动关闭自动更新 |
+| `Unknown easylife-ai command: doctor` | 本地构建被线上 release 覆盖 | 重跑 `task dev`；`scripts/dev.sh` 已自动关闭自动更新 |
 | token 无数据但 hook 正常 | `token_report` 被关闭 | 检查 `tracker-config.json` 的 `token_report`，缺失时默认 `true` |

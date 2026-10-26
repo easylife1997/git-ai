@@ -37,7 +37,7 @@ pub fn handle_squash_authorship(args: &[String]) {
         None => {
             eprintln!("Error: base_branch argument is required");
             eprintln!(
-                "Usage: git-ai squash-authorship <base_branch> <new_sha> <old_sha> [--dry-run]"
+                "Usage: easylife-ai squash-authorship <base_branch> <new_sha> <old_sha> [--dry-run]"
             );
             std::process::exit(1);
         }
@@ -48,7 +48,7 @@ pub fn handle_squash_authorship(args: &[String]) {
         None => {
             eprintln!("Error: new_sha argument is required");
             eprintln!(
-                "Usage: git-ai squash-authorship <base_branch> <new_sha> <old_sha> [--dry-run]"
+                "Usage: easylife-ai squash-authorship <base_branch> <new_sha> <old_sha> [--dry-run]"
             );
             std::process::exit(1);
         }
@@ -59,7 +59,7 @@ pub fn handle_squash_authorship(args: &[String]) {
         None => {
             eprintln!("Error: old_sha argument is required");
             eprintln!(
-                "Usage: git-ai squash-authorship <base_branch> <new_sha> <old_sha> [--dry-run]"
+                "Usage: easylife-ai squash-authorship <base_branch> <new_sha> <old_sha> [--dry-run]"
             );
             std::process::exit(1);
         }

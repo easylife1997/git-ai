@@ -3,9 +3,10 @@ use crate::mdm::hook_installer::{
     HookCheckResult, HookInstaller, HookInstallerParams, InstallResult, UninstallResult,
 };
 use crate::mdm::jetbrains::{
-    DetectedIde, MARKETPLACE_URL, MIN_INTELLIJ_BUILD, PLUGIN_ID, download_plugin_from_marketplace,
-    find_jetbrains_installations, install_plugin_to_directory, install_plugin_via_cli,
-    is_plugin_installed,
+    DetectedIde, MARKETPLACE_URL, MIN_INTELLIJ_BUILD, PLUGIN_ID, default_backup_path,
+    download_plugin_from_marketplace, find_jetbrains_installations, install_plugin_to_directory,
+    install_plugin_via_cli, is_plugin_installed, restore_jetbrains_git_xml,
+    update_jetbrains_git_xml,
 };
 pub struct JetBrainsInstaller;
 
@@ -19,12 +20,37 @@ impl JetBrainsInstaller {
     fn install_to_ide(detected: &DetectedIde, dry_run: bool) -> InstallResult {
         let ide_name = detected.ide.name;
 
+        // Always ensure the git path setting points to our shim, regardless of plugin state.
+        let options_dir = detected.options_dir();
+        let git_path_result =
+            update_jetbrains_git_xml(&options_dir, &default_backup_path(), dry_run);
+        let (git_path_diff, git_path_warning) = match git_path_result {
+            Ok(diff) => (diff, None),
+            Err(e) => {
+                tracing::debug!(
+                    "JetBrains: Failed to update git.xml for {}: {}",
+                    ide_name,
+                    e
+                );
+                (
+                    None,
+                    Some(format!(
+                        "{}: Could not set the Git executable in {} ({}). Set it manually to ~/.easylife-ai/bin/git in Settings > Version Control > Git.",
+                        ide_name,
+                        options_dir.join("git.xml").display(),
+                        e
+                    )),
+                )
+            }
+        };
+
         // Check if already installed
         if is_plugin_installed(detected) {
             return InstallResult {
-                changed: false,
-                diff: None,
-                message: format!("{}: Plugin already installed", ide_name),
+                changed: git_path_diff.is_some(),
+                diff: git_path_diff,
+                message: git_path_warning
+                    .unwrap_or_else(|| format!("{}: Plugin already installed", ide_name)),
             };
         }
 
@@ -35,8 +61,8 @@ impl JetBrainsInstaller {
                 .as_deref()
                 .unwrap_or("unknown version");
             return InstallResult {
-                changed: false,
-                diff: None,
+                changed: git_path_diff.is_some(),
+                diff: git_path_diff,
                 message: format!(
                     "{}: Skipped (build {} is older than minimum required build {})",
                     ide_name, version_info, MIN_INTELLIJ_BUILD
@@ -47,7 +73,7 @@ impl JetBrainsInstaller {
         if dry_run {
             return InstallResult {
                 changed: true,
-                diff: None,
+                diff: git_path_diff,
                 message: format!("{}: Pending plugin install", ide_name),
             };
         }
@@ -57,7 +83,7 @@ impl JetBrainsInstaller {
             Ok(true) => {
                 return InstallResult {
                     changed: true,
-                    diff: None,
+                    diff: git_path_diff,
                     message: format!("{}: Plugin installed via CLI", ide_name),
                 };
             }
@@ -84,7 +110,7 @@ impl JetBrainsInstaller {
                         Ok(()) => {
                             return InstallResult {
                                 changed: true,
-                                diff: None,
+                                diff: git_path_diff,
                                 message: format!(
                                     "{}: Plugin installed from JetBrains Marketplace",
                                     ide_name
@@ -112,8 +138,8 @@ impl JetBrainsInstaller {
 
         // Provide manual installation URL as last resort
         InstallResult {
-            changed: false,
-            diff: None,
+            changed: git_path_diff.is_some(),
+            diff: git_path_diff,
             message: format!(
                 "{}: Unable to automatically install plugin. Please install manually from: {}",
                 ide_name, MARKETPLACE_URL
@@ -235,7 +261,7 @@ impl HookInstaller for JetBrainsInstaller {
     fn uninstall_extras(
         &self,
         _params: &HookInstallerParams,
-        _dry_run: bool,
+        dry_run: bool,
     ) -> Result<Vec<UninstallResult>, GitAiError> {
         let installations = Self::get_installations();
 
@@ -246,6 +272,29 @@ impl HookInstaller for JetBrainsInstaller {
         let mut results = Vec::new();
 
         for detected in &installations {
+            // Restore git.xml regardless of plugin state.
+            let options_dir = detected.options_dir();
+            match restore_jetbrains_git_xml(&options_dir, &default_backup_path(), dry_run) {
+                Ok(Some(diff)) => {
+                    results.push(UninstallResult {
+                        changed: true,
+                        diff: Some(diff),
+                        message: format!(
+                            "{}: Restored git executable path in options/git.xml",
+                            detected.ide.name
+                        ),
+                    });
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::debug!(
+                        "JetBrains: Failed to restore git.xml for {}: {}",
+                        detected.ide.name,
+                        e
+                    );
+                }
+            }
+
             if is_plugin_installed(detected) {
                 results.push(UninstallResult {
                     changed: false,
