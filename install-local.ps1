@@ -94,7 +94,7 @@ $InstallDir = Join-Path $HOME '.easylife-ai\bin'
 
 # 自动更新服务端地址：客户端检查新版本时访问的 URL
 # 私有化部署时改为内部服务器地址（如 https://your-internal-server.com）
-$UpdateReleaseUrl = 'https://github.com/easylife1997/easylife-ai/releases'
+$UpdateReleaseUrl = 'http://localhost:5173/client'
 
 # 稳定版更新目标版本：每次发布时手动更新，格式为 x.y.z
 $UpdateReleaseVersion = '1.0.6'
@@ -107,12 +107,12 @@ $UpdateCheckIntervalSeconds = 3600
 # 可选值：latest（稳定版）、next（预览版）
 $UpdateChannel = 'latest'
 
-# 是否禁用自动更新：$true = 锁定当前版本，不自动升级（默认）；$false = 允许自动更新
-# 注意：此值仅在用户配置文件中不存在该字段时写入，已有配置的用户不受影响
-$DisableAutoUpdates = $true
+# 是否禁用自动更新：$false = 允许自动更新（默认）；$true = 锁定当前版本，不自动升级
+# 注意：每次安装/更新都会覆盖用户配置文件中的该字段
+$DisableAutoUpdates = $false
 
 # 是否禁用版本检查提示：$false = 正常显示版本过旧提示（默认）；$true = 静默跳过
-# 注意：与 DisableAutoUpdates 相同，仅在该字段缺失时写入
+# 注意：与 DisableAutoUpdates 相同，每次安装/更新都会覆盖
 $DisableVersionChecks = $false
 
 # ============================================================
@@ -287,21 +287,13 @@ try {
         update_release_version = $UpdateReleaseVersion
         update_check_interval_seconds = $UpdateCheckIntervalSeconds
         update_channel = $UpdateChannel
+        disable_auto_updates = $DisableAutoUpdates
+        disable_version_checks = $DisableVersionChecks
     }
     foreach ($entry in $overwrite.GetEnumerator()) {
         if ($cfg.PSObject.Properties.Name -contains $entry.Key) {
             $cfg.($entry.Key) = $entry.Value
         } else {
-            $cfg | Add-Member -NotePropertyName $entry.Key -NotePropertyValue $entry.Value
-        }
-    }
-    # Only fill these if absent — user may have intentionally disabled updates.
-    $fillIfAbsent = [ordered]@{
-        disable_auto_updates = $DisableAutoUpdates
-        disable_version_checks = $DisableVersionChecks
-    }
-    foreach ($entry in $fillIfAbsent.GetEnumerator()) {
-        if (-not ($cfg.PSObject.Properties.Name -contains $entry.Key)) {
             $cfg | Add-Member -NotePropertyName $entry.Key -NotePropertyValue $entry.Value
         }
     }

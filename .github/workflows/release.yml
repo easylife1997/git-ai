@@ -284,15 +284,18 @@ jobs:
               cp "$src" "easylife-pkg/easylife-ai-$f.exe"
             fi
           done
-          # Copy local install scripts
-          cp install-local.sh easylife-pkg/
-          cp install-local.ps1 easylife-pkg/
-          chmod +x easylife-pkg/install-local.sh
+
+      - name: Copy install scripts
+        run: |
+          # Original install scripts, unmodified
+          cp install.sh easylife-pkg/install.sh
+          cp install.ps1 easylife-pkg/install.ps1
+          chmod +x easylife-pkg/install.sh
 
       - name: Create SHA256SUMS
         run: |
           cd easylife-pkg
-          sha256sum easylife-ai-* install-local.sh install-local.ps1 > SHA256SUMS
+          sha256sum easylife-ai-* install.sh install.ps1 > SHA256SUMS
 
       - name: Package zip
         run: |
