@@ -17,6 +17,8 @@ pub fn upload_commit(
     let commit_info = gather_commit_info(repo_path, commit_sha)?;
     let repo_url = get_remote_url(repo_path, remote).unwrap_or_else(|| repo_path.to_string());
     let git_ai_raw = get_git_ai_stats(repo_path, commit_sha);
+    let ai_line_ranges = get_ai_line_ranges(repo_path, commit_sha);
+    let deleted_line_origins = super::origins::deleted_line_origins(repo_path, commit_sha);
     let git_ai_version = get_git_ai_version();
     let pusher_identity = get_pusher_identity(repo_path, commit_sha, Some(config));
 
@@ -58,6 +60,8 @@ pub fn upload_commit(
             "git_ai_raw": git_ai_raw,
             "git_ai_version": git_ai_version,
             "diff_gz": diff_gz_base64,
+            "ai_line_ranges": ai_line_ranges,
+            "deleted_line_origins": deleted_line_origins,
         }]
     });
 
@@ -328,6 +332,72 @@ fn get_git_ai_stats(repo_path: &str, commit_sha: &str) -> serde_json::Value {
     }
 }
 
+/// 读取本提交 `refs/notes/ai` 里的逐行归属，只保留 AI 写的行。
+///
+/// 返回 `{ "文件路径": [[起始行, 结束行], ...] }`，行号是提交后文件里的行号（1 起，闭区间），
+/// 每个文件的区间已排序并合并。
+/// - 没有 notes（或读取 / 解析失败）返回 `null`：服务端据此区分「无归属信息」和「有归属但没有 AI 行」。
+/// - 有 notes 但没有 AI 行时返回 `{}`。
+///
+/// 只上报文件路径和行号，不上报 notes 里的 prompts / 对话内容。
+fn get_ai_line_ranges(repo_path: &str, commit_sha: &str) -> Value {
+    let work_tree = super::resolve_work_tree(repo_path);
+    let Ok(repo) = crate::git::repository::find_repository_in_path(&work_tree) else {
+        return Value::Null;
+    };
+    match crate::git::refs::get_authorship(&repo, commit_sha) {
+        Some(log) => ai_line_ranges_from_log(&log),
+        None => Value::Null,
+    }
+}
+
+fn ai_line_ranges_from_log(
+    log: &crate::authorship::authorship_log_serialization::AuthorshipLog,
+) -> Value {
+    use crate::authorship::authorship_log::LineRange;
+
+    let mut files = serde_json::Map::new();
+    for file in &log.attestations {
+        let mut ranges: Vec<(u32, u32)> = file
+            .entries
+            .iter()
+            // `h_` 前缀是已知的人工作者，其余哈希对应 metadata.prompts 里的 AI 会话
+            .filter(|entry| !entry.hash.starts_with("h_"))
+            .flat_map(|entry| entry.line_ranges.iter())
+            .map(|range| match range {
+                LineRange::Single(line) => (*line, *line),
+                LineRange::Range(start, end) => (*start.min(end), *start.max(end)),
+            })
+            .collect();
+        if ranges.is_empty() {
+            continue;
+        }
+
+        ranges.sort_unstable();
+        let mut merged: Vec<(u32, u32)> = Vec::with_capacity(ranges.len());
+        for (start, end) in ranges {
+            match merged.last_mut() {
+                // 重叠或首尾相接的区间合并成一个
+                Some(last) if start <= last.1.saturating_add(1) => last.1 = last.1.max(end),
+                _ => merged.push((start, end)),
+            }
+        }
+
+        let value = merged
+            .into_iter()
+            .map(|(start, end)| json!([start, end]))
+            .collect::<Vec<_>>();
+        // 同一路径出现多次时追加，服务端按区间求交集，重复无影响
+        match files.get_mut(&file.file_path) {
+            Some(Value::Array(existing)) => existing.extend(value),
+            _ => {
+                files.insert(file.file_path.clone(), Value::Array(value));
+            }
+        }
+    }
+    Value::Object(files)
+}
+
 fn get_git_ai_version() -> String {
     let binary = std::env::current_exe()
         .ok()
@@ -362,6 +432,44 @@ mod outcome_tests {
         }
         let malformed = parse_stats_response("not json", ReportOutcome::from_http_status(200));
         assert!(!malformed.accepted());
+    }
+
+    #[test]
+    fn ai_line_ranges_keep_only_ai_entries_sorted_and_merged() {
+        use crate::authorship::authorship_log::LineRange;
+        use crate::authorship::authorship_log_serialization::{AttestationEntry, AuthorshipLog};
+
+        let mut log = AuthorshipLog::new();
+        let file = log.get_or_create_file("src/a.rs");
+        file.add_entry(AttestationEntry::new(
+            "ef272a2aa4e23b7d".to_string(),
+            vec![LineRange::Range(10, 12), LineRange::Single(5)],
+        ));
+        // 另一个 AI 会话：与 10-12 首尾相接，应合并成 10-14
+        file.add_entry(AttestationEntry::new(
+            "0123456789abcdef".to_string(),
+            vec![LineRange::Range(13, 14)],
+        ));
+        // 已知人工作者：不能计入 AI 行
+        file.add_entry(AttestationEntry::new(
+            "h_alice".to_string(),
+            vec![LineRange::Range(20, 30)],
+        ));
+        // 只有人工行的文件不出现在结果里
+        log.get_or_create_file("src/human.rs")
+            .add_entry(AttestationEntry::new(
+                "h_bob".to_string(),
+                vec![LineRange::Single(1)],
+            ));
+
+        let got = ai_line_ranges_from_log(&log);
+        assert_eq!(got, serde_json::json!({ "src/a.rs": [[5, 5], [10, 14]] }));
+
+        // 有 notes 但没有 AI 行：空对象，而不是 null
+        assert_eq!(
+            ai_line_ranges_from_log(&AuthorshipLog::new()),
+            serde_json::json!({})
+        );
     }
 }
 

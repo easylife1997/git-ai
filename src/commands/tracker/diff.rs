@@ -28,13 +28,18 @@ pub fn collect_code_diff(repo_path: &str, commit_sha: &str) -> Result<Vec<u8>, S
     gzip_compress(&truncated)
 }
 
+/// `diff --git` 头是否属于上报的代码文件（与 diff_gz 的过滤口径一致）。
+pub(crate) fn is_code_diff_header(line: &str) -> bool {
+    CODE_EXTENSIONS.iter().any(|ext| line.contains(ext))
+}
+
 fn filter_code_only(diff: &str) -> String {
     let mut result = String::new();
     let mut in_code_file = false;
 
     for line in diff.lines() {
         if line.starts_with("diff --git") {
-            in_code_file = CODE_EXTENSIONS.iter().any(|ext| line.contains(ext));
+            in_code_file = is_code_diff_header(line);
         }
         if in_code_file {
             result.push_str(line);

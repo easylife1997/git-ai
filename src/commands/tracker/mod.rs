@@ -3,6 +3,7 @@ pub mod diff;
 pub mod filter;
 pub mod log;
 pub mod notes;
+pub mod origins;
 pub mod retry;
 pub mod upload;
 
