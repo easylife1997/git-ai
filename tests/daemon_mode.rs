@@ -4049,7 +4049,12 @@ fn spawn_daemon_with_env(repo: &TestRepo, extra_env: &[(&str, String)]) -> Child
 fn update_enabled_config_patch() -> String {
     serde_json::json!({
         "disable_version_checks": false,
-        "disable_auto_updates": false
+        "disable_auto_updates": false,
+        // 关机后的自更新会重新拉取 release。默认 URL 指向真实服务器，
+        // 网络慢/不通时安装会阻塞到 HTTP 超时（30s+），超出测试的退出时限。
+        // 钉到本地必然拒绝连接的端口：安装秒失败，进程立刻退出（退出码仍为 0），
+        // 测试只关心"检测到待更新 → 优雅关机 → 自行退出"，不关心安装结果。
+        "update_release_url": "http://127.0.0.1:9/client"
     })
     .to_string()
 }
