@@ -51,9 +51,9 @@ UPDATE_CHECK_INTERVAL_SECONDS_DEFAULT=3600
 # 可选值：latest（稳定版）、next（预览版）
 UPDATE_CHANNEL_DEFAULT="latest"
 
-# 是否禁用自动更新：false = 允许自动更新（默认）；true = 锁定当前版本，不自动升级
+# 是否禁用自动更新：true = 锁定当前版本，不自动升级（默认）；false = 允许自动更新
 # 注意：此值仅在用户配置文件中不存在该字段时写入，已有配置的用户不受影响
-DISABLE_AUTO_UPDATES_DEFAULT=false
+DISABLE_AUTO_UPDATES_DEFAULT=true
 
 # 是否禁用版本检查提示：false = 正常显示版本过旧提示（默认）；true = 静默跳过
 # 注意：与 disable_auto_updates 相同，仅在该字段缺失时写入

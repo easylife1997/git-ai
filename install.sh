@@ -67,7 +67,8 @@ INSTALL_DIR="$HOME/.easylife-ai/bin"
 
 # 自动更新服务端地址：客户端检查新版本时访问的 URL
 # 私有化部署时改为内部服务器地址（如 https://your-internal-server.com）
-UPDATE_RELEASE_URL_DEFAULT="http://192.168.110.18:5173/client"
+# 本脚本发布到生产环境（https://easylife.work 反向代理），本地开发环境安装用 install-local.sh
+UPDATE_RELEASE_URL_DEFAULT="https://easylife.work/client"
 
 # 稳定版更新目标版本：每次发布时手动更新，格式为 x.y.z
 UPDATE_RELEASE_VERSION_DEFAULT="1.0.9"
@@ -80,9 +81,9 @@ UPDATE_CHECK_INTERVAL_SECONDS_DEFAULT=3600
 # 可选值：latest（稳定版）、next（预览版）
 UPDATE_CHANNEL_DEFAULT="latest"
 
-# 是否禁用自动更新：false = 允许自动更新（默认）；true = 锁定当前版本，不自动升级
+# 是否禁用自动更新：true = 锁定当前版本，不自动升级（默认）；false = 允许自动更新
 # 注意：此值仅在用户配置文件中不存在该字段时写入，已有配置的用户不受影响
-DISABLE_AUTO_UPDATES_DEFAULT=false
+DISABLE_AUTO_UPDATES_DEFAULT=true
 
 # 是否禁用版本检查提示：false = 正常显示版本过旧提示（默认）；true = 静默跳过
 # 注意：与 disable_auto_updates 相同，仅在该字段缺失时写入
@@ -512,13 +513,24 @@ if [ -n "${TRACKER_URL:-}" ] && [ -n "${TEAM_ID:-}" ] && [ -n "${TEAM_KEY:-}" ];
         echo "Configuring tracker with username: $INSTALL_USERNAME"
         TMP_TRACKER_CFG="$TRACKER_CONFIG_PATH.tmp.$$"
         if command -v jq >/dev/null 2>&1; then
-            jq -n \
+            # 合并进现有配置：保留客户端写入的字段（如 token_report），
+            # 仅覆盖安装器管理的五个字段；现有文件缺失或非法时回退为全新构建。
+            if ! jq \
                 --arg url "$TRACKER_URL" \
                 --arg id "$TEAM_ID" \
                 --arg key "$TEAM_KEY" \
                 --arg user "$INSTALL_USERNAME" \
                 --argjson blacklist "$EXISTING_BLACKLIST" \
-                '{tracker_url: $url, team_id: $id, team_key: $key, username: $user, blacklist: $blacklist}' > "$TMP_TRACKER_CFG"
+                '. + {tracker_url: $url, team_id: $id, team_key: $key, username: $user, blacklist: $blacklist}' \
+                "$TRACKER_CONFIG_PATH" > "$TMP_TRACKER_CFG" 2>/dev/null; then
+                jq -n \
+                    --arg url "$TRACKER_URL" \
+                    --arg id "$TEAM_ID" \
+                    --arg key "$TEAM_KEY" \
+                    --arg user "$INSTALL_USERNAME" \
+                    --argjson blacklist "$EXISTING_BLACKLIST" \
+                    '{tracker_url: $url, team_id: $id, team_key: $key, username: $user, blacklist: $blacklist}' > "$TMP_TRACKER_CFG"
+            fi
         else
             error "jq is required but not found. Cannot write tracker config safely."
             exit 1

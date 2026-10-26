@@ -221,7 +221,8 @@ $InstallDir = Join-Path $HOME '.easylife-ai\bin'
 
 # 自动更新服务端地址：客户端检查新版本时访问的 URL
 # 私有化部署时改为内部服务器地址（如 https://your-internal-server.com）
-$UpdateReleaseUrl = 'http://192.168.110.18:5173/client'
+# 本脚本发布到生产环境（https://easylife.work 反向代理），本地开发环境安装用 install-local.ps1
+$UpdateReleaseUrl = 'https://easylife.work/client'
 
 # 稳定版更新目标版本：每次发布时手动更新，格式为 x.y.z
 $UpdateReleaseVersion = '1.0.9'
@@ -234,9 +235,9 @@ $UpdateCheckIntervalSeconds = 3600
 # 可选值：latest（稳定版）、next（预览版）
 $UpdateChannel = 'latest'
 
-# 是否禁用自动更新：$false = 允许自动更新（默认）；$true = 锁定当前版本，不自动升级
+# 是否禁用自动更新：$true = 锁定当前版本，不自动升级（默认）；$false = 允许自动更新
 # 注意：此值仅在用户配置文件中不存在该字段时写入，已有配置的用户不受影响
-$DisableAutoUpdates = $false
+$DisableAutoUpdates = $true
 
 # 是否禁用版本检查提示：$false = 正常显示版本过旧提示（默认）；$true = 静默跳过
 # 注意：与 DisableAutoUpdates 相同，仅在该字段缺失时写入
@@ -676,11 +677,12 @@ try {
 $trackerConfigPath = Join-Path $configDir 'tracker-config.json'
 if ($env:TRACKER_URL -and $env:TEAM_ID -and $env:TEAM_KEY) {
     try {
+        $existingCfg = $null
         $existingBlacklist = @()
         if (Test-Path -LiteralPath $trackerConfigPath) {
             try {
-                $existing = Get-Content -LiteralPath $trackerConfigPath -Raw | ConvertFrom-Json
-                if ($existing.blacklist) { $existingBlacklist = $existing.blacklist }
+                $existingCfg = Get-Content -LiteralPath $trackerConfigPath -Raw | ConvertFrom-Json
+                if ($existingCfg.blacklist) { $existingBlacklist = $existingCfg.blacklist }
             } catch { }
         }
 
@@ -697,14 +699,23 @@ if ($env:TRACKER_URL -and $env:TEAM_ID -and $env:TEAM_KEY) {
         }
 
         if ($installUsername) {
-            $trackerCfg = @{
+            # 合并进现有配置：保留客户端写入的字段（如 token_report），
+            # 仅覆盖安装器管理的五个字段；现有文件缺失或非法时回退为全新构建。
+            $managed = @{
                 tracker_url = $env:TRACKER_URL
                 team_id     = $env:TEAM_ID
                 team_key    = $env:TEAM_KEY
                 username    = $installUsername
                 blacklist   = $existingBlacklist
             }
-            $trackerCfg = $trackerCfg | ConvertTo-Json -Depth 3 -Compress
+            if ($existingCfg -is [System.Management.Automation.PSCustomObject]) {
+                foreach ($p in $managed.GetEnumerator()) {
+                    $existingCfg | Add-Member -NotePropertyName $p.Key -NotePropertyValue $p.Value -Force
+                }
+                $trackerCfg = $existingCfg | ConvertTo-Json -Depth 3 -Compress
+            } else {
+                $trackerCfg = $managed | ConvertTo-Json -Depth 3 -Compress
+            }
             $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
             [System.IO.File]::WriteAllText($trackerConfigPath, $trackerCfg, $utf8NoBom)
             Write-Success "Tracker configuration written to $trackerConfigPath"
