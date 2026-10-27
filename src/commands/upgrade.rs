@@ -60,7 +60,6 @@ static LAST_BACKGROUND_SPAWN: AtomicU64 = AtomicU64::new(0);
 enum UpgradeAction {
     UpgradeAvailable,
     AlreadyLatest,
-    RunningNewerVersion,
     ForceReinstall,
 }
 
@@ -69,7 +68,6 @@ impl UpgradeAction {
         match self {
             UpgradeAction::UpgradeAvailable => "upgrade_available",
             UpgradeAction::AlreadyLatest => "already_latest",
-            UpgradeAction::RunningNewerVersion => "running_newer_version",
             UpgradeAction::ForceReinstall => "force_reinstall",
         }
     }
@@ -564,6 +562,9 @@ fn semver_from_tag(tag: &str) -> String {
     trimmed.split(['-', '+']).next().unwrap_or("").to_string()
 }
 
+/// 更新判定：安装脚本声明的版本（UPDATE_RELEASE_VERSION_DEFAULT）就是期望版本。
+/// 本机记录版本（config 的 update_release_version，`easylife-ai version` 显示的值）
+/// 与它不一致——无论高低——都重装对齐；安装脚本执行后会把它写回 config，判定随之稳定。
 fn determine_action(force: bool, release: &ChannelRelease, current_version: &str) -> UpgradeAction {
     if force {
         return UpgradeAction::ForceReinstall;
@@ -571,10 +572,19 @@ fn determine_action(force: bool, release: &ChannelRelease, current_version: &str
 
     if release.semver == current_version {
         UpgradeAction::AlreadyLatest
-    } else if is_newer_version(&release.semver, current_version) {
-        UpgradeAction::UpgradeAvailable
     } else {
-        UpgradeAction::RunningNewerVersion
+        UpgradeAction::UpgradeAvailable
+    }
+}
+
+/// 更新比较用的"已安装版本"：以安装脚本写入 config 的 update_release_version
+/// 为准（与 `easylife-ai version` 显示一致）；字段缺失时退回编译期版本。
+fn resolve_installed_version(declared: &str) -> String {
+    let declared = declared.trim();
+    if declared.is_empty() {
+        env!("CARGO_PKG_VERSION").to_string()
+    } else {
+        declared.to_string()
     }
 }
 
@@ -954,7 +964,14 @@ fn run_impl(force: bool, background: bool) {
     let config = config::Config::get();
     let channel = config.update_channel();
     let skip_install = background && config.auto_updates_disabled();
-    let _ = run_impl_with_url(force, config.update_release_url(), channel, skip_install);
+    let installed_version = resolve_installed_version(config.update_release_version());
+    let _ = run_impl_with_url(
+        force,
+        config.update_release_url(),
+        channel,
+        skip_install,
+        installed_version.as_str(),
+    );
 }
 
 fn run_impl_with_url(
@@ -962,9 +979,8 @@ fn run_impl_with_url(
     api_base_url: &str,
     channel: UpdateChannel,
     skip_install: bool,
+    current_version: &str,
 ) -> UpgradeAction {
-    let current_version = env!("CARGO_PKG_VERSION");
-
     println!("Checking for updates (channel: {})...", channel.as_str());
 
     let release = match fetch_release_for_channel(api_base_url, channel) {
@@ -1004,14 +1020,6 @@ fn run_impl_with_url(
             println!("You are already on the latest version!");
             println!();
             println!("To reinstall anyway, run:");
-            println!("  \x1b[1;36mgit-ai upgrade --force\x1b[0m");
-            return action;
-        }
-        UpgradeAction::RunningNewerVersion => {
-            println!("You are running a newer version than the selected release channel.");
-            println!("(This usually means you're running a development build)");
-            println!();
-            println!("To reinstall the selected release anyway, run:");
             println!("  \x1b[1;36mgit-ai upgrade --force\x1b[0m");
             return action;
         }
@@ -1162,7 +1170,7 @@ fn print_cached_notice(cache: &UpdateCache) {
         return;
     }
 
-    let current_version = env!("CARGO_PKG_VERSION");
+    let current_version = resolve_installed_version(config::Config::get().update_release_version());
     let available_version = cache.available_semver.as_deref().unwrap_or("");
 
     eprintln!();
@@ -1265,7 +1273,8 @@ pub fn check_and_install_update_if_available() -> Result<DaemonUpdateCheckResult
 
     // Re-fetch the release to get the tag needed for the installer.
     let release = fetch_release_for_channel(api_base_url, channel)?;
-    let current_version = env!("CARGO_PKG_VERSION");
+    let current_version = resolve_installed_version(config.update_release_version());
+    let current_version = current_version.as_str();
     let action = determine_action(false, &release, current_version);
 
     if action != UpgradeAction::UpgradeAvailable {
@@ -1317,7 +1326,14 @@ pub fn check_and_install_update_if_available() -> Result<DaemonUpdateCheckResult
     // Install silently after the backup is complete. Unix installers return a
     // result directly; Windows installers are detached because the running exe
     // must exit before it can be replaced.
-    if let Err(error) = run_install_script(&script_content, &release.tag, true) {
+    // /client 布局没有与脚本声明版本对应的版本目录，固定传 latest 让脚本
+    // 下载 {base}/latest/{binary}（脚本声明的版本就是刚校验过的那个）。
+    let installer_tag = if is_client_release_url(api_base_url) {
+        "latest"
+    } else {
+        release.tag.as_str()
+    };
+    if let Err(error) = run_install_script(&script_content, installer_tag, true) {
         let _ = backup::restore_backup(&backup.backup_id);
         return Err(format!(
             "Installation failed and rollback was attempted: {}",
@@ -1380,7 +1396,8 @@ pub fn check_for_update_available() -> Result<DaemonUpdateCheckResult, String> {
     }
 
     let release = fetch_release_for_channel(api_base_url, channel)?;
-    let current_version = env!("CARGO_PKG_VERSION");
+    let current_version = resolve_installed_version(config.update_release_version());
+    let current_version = current_version.as_str();
     let action = determine_action(false, &release, current_version);
     let cache_release = matches!(action, UpgradeAction::UpgradeAvailable);
     persist_update_state(channel, cache_release.then_some(&release));
@@ -1401,27 +1418,6 @@ pub fn check_for_update_available() -> Result<DaemonUpdateCheckResult, String> {
     } else {
         Ok(DaemonUpdateCheckResult::NoUpdate)
     }
-}
-
-fn is_newer_version(latest: &str, current: &str) -> bool {
-    let parse_version =
-        |v: &str| -> Vec<u32> { v.split('.').filter_map(|s| s.parse::<u32>().ok()).collect() };
-
-    let latest_parts = parse_version(latest);
-    let current_parts = parse_version(current);
-
-    for i in 0..latest_parts.len().max(current_parts.len()) {
-        let latest_part = latest_parts.get(i).copied().unwrap_or(0);
-        let current_part = current_parts.get(i).copied().unwrap_or(0);
-
-        if latest_part > current_part {
-            return true;
-        } else if latest_part < current_part {
-            return false;
-        }
-    }
-
-    false
 }
 
 #[cfg(test)]
@@ -1540,31 +1536,6 @@ mod tests {
     }
 
     #[test]
-    fn test_is_newer_version() {
-        assert!(!is_newer_version("1.0.0", "1.0.0"));
-        assert!(!is_newer_version("1.0.10", "1.0.10"));
-
-        assert!(is_newer_version("1.0.1", "1.0.0"));
-        assert!(is_newer_version("1.0.11", "1.0.10"));
-        assert!(!is_newer_version("1.0.0", "1.0.1"));
-        assert!(!is_newer_version("1.0.10", "1.0.11"));
-
-        assert!(is_newer_version("1.1.0", "1.0.0"));
-        assert!(!is_newer_version("1.0.0", "1.1.0"));
-
-        assert!(is_newer_version("2.0.0", "1.0.0"));
-        assert!(is_newer_version("2.0.0", "1.9.9"));
-        assert!(!is_newer_version("1.9.9", "2.0.0"));
-
-        assert!(is_newer_version("1.0.0.1", "1.0.0"));
-        assert!(!is_newer_version("1.0.0", "1.0.0.1"));
-
-        assert!(is_newer_version("1.10.0", "1.9.0"));
-        assert!(is_newer_version("1.0.100", "1.0.99"));
-        assert!(is_newer_version("100.200.300", "100.200.299"));
-    }
-
-    #[test]
     fn test_semver_from_tag_strips_prefix_and_suffix() {
         assert_eq!(semver_from_tag("v1.2.3"), "1.2.3");
         assert_eq!(semver_from_tag("1.2.3"), "1.2.3");
@@ -1592,6 +1563,7 @@ mod tests {
             )),
             UpdateChannel::Latest,
             true,
+            env!("CARGO_PKG_VERSION"),
         );
         assert_eq!(action, UpgradeAction::UpgradeAvailable);
 
@@ -1605,6 +1577,7 @@ mod tests {
             &mock_url(&same_version_payload),
             UpdateChannel::Latest,
             true,
+            env!("CARGO_PKG_VERSION"),
         );
         assert_eq!(action, UpgradeAction::AlreadyLatest);
 
@@ -1614,6 +1587,7 @@ mod tests {
             &mock_url(&same_version_payload),
             UpdateChannel::Latest,
             true,
+            env!("CARGO_PKG_VERSION"),
         );
         assert_eq!(action, UpgradeAction::ForceReinstall);
 
@@ -1626,8 +1600,10 @@ mod tests {
             )),
             UpdateChannel::Latest,
             true,
+            env!("CARGO_PKG_VERSION"),
         );
-        assert_eq!(action, UpgradeAction::RunningNewerVersion);
+        // 本机记录版本高于服务器脚本声明：服务器为准，重装对齐
+        assert_eq!(action, UpgradeAction::UpgradeAvailable);
 
         // Older version with --force - force reinstall
         let action = run_impl_with_url(
@@ -1638,6 +1614,7 @@ mod tests {
             )),
             UpdateChannel::Latest,
             true,
+            env!("CARGO_PKG_VERSION"),
         );
         assert_eq!(action, UpgradeAction::ForceReinstall);
 
@@ -1663,6 +1640,7 @@ mod tests {
             )),
             UpdateChannel::EnterpriseLatest,
             true,
+            env!("CARGO_PKG_VERSION"),
         );
         assert_eq!(action, UpgradeAction::UpgradeAvailable);
 
@@ -1676,6 +1654,7 @@ mod tests {
             &mock_url(&same_version_payload),
             UpdateChannel::EnterpriseLatest,
             true,
+            env!("CARGO_PKG_VERSION"),
         );
         assert_eq!(action, UpgradeAction::AlreadyLatest);
 
@@ -1685,6 +1664,7 @@ mod tests {
             &mock_url(&same_version_payload),
             UpdateChannel::EnterpriseLatest,
             true,
+            env!("CARGO_PKG_VERSION"),
         );
         assert_eq!(action, UpgradeAction::ForceReinstall);
 
@@ -1697,8 +1677,10 @@ mod tests {
             )),
             UpdateChannel::EnterpriseLatest,
             true,
+            env!("CARGO_PKG_VERSION"),
         );
-        assert_eq!(action, UpgradeAction::RunningNewerVersion);
+        // 本机记录版本高于服务器脚本声明：服务器为准，重装对齐
+        assert_eq!(action, UpgradeAction::UpgradeAvailable);
 
         // Older version with --force - force reinstall
         let action = run_impl_with_url(
@@ -1709,6 +1691,7 @@ mod tests {
             )),
             UpdateChannel::EnterpriseLatest,
             true,
+            env!("CARGO_PKG_VERSION"),
         );
         assert_eq!(action, UpgradeAction::ForceReinstall);
 
@@ -1915,14 +1898,28 @@ mod tests {
     }
 
     #[test]
-    fn test_determine_action_running_newer() {
+    fn test_determine_action_mismatch_reinstalls() {
         let release = ChannelRelease {
             tag: "v1.0.0".to_string(),
             semver: "1.0.0".to_string(),
             checksum: "abc".to_string(),
         };
+        // 本机版本高于服务器脚本声明 → 重装对齐（服务器为准）
         let action = determine_action(false, &release, "2.0.0");
-        assert_eq!(action, UpgradeAction::RunningNewerVersion);
+        assert_eq!(action, UpgradeAction::UpgradeAvailable);
+        // 本机版本低于服务器脚本声明 → 升级
+        let action = determine_action(false, &release, "0.9.0");
+        assert_eq!(action, UpgradeAction::UpgradeAvailable);
+    }
+
+    #[test]
+    fn test_resolve_installed_version() {
+        // 缺失/空白时退回编译期版本
+        assert_eq!(resolve_installed_version(""), env!("CARGO_PKG_VERSION"));
+        assert_eq!(resolve_installed_version("  "), env!("CARGO_PKG_VERSION"));
+        // 有值时原样使用（含裁剪）
+        assert_eq!(resolve_installed_version("1.0.6"), "1.0.6");
+        assert_eq!(resolve_installed_version(" 1.0.6 "), "1.0.6");
     }
 
     #[test]
@@ -1932,10 +1929,6 @@ mod tests {
             "upgrade_available"
         );
         assert_eq!(UpgradeAction::AlreadyLatest.to_string(), "already_latest");
-        assert_eq!(
-            UpgradeAction::RunningNewerVersion.to_string(),
-            "running_newer_version"
-        );
         assert_eq!(UpgradeAction::ForceReinstall.to_string(), "force_reinstall");
     }
 
@@ -1956,36 +1949,6 @@ mod tests {
         assert_eq!(semver_from_tag(""), "");
         assert_eq!(semver_from_tag("v"), "");
         assert_eq!(semver_from_tag("enterprise-v"), "");
-    }
-
-    #[test]
-    fn test_is_newer_version_major() {
-        assert!(is_newer_version("2.0.0", "1.9.9"));
-        assert!(!is_newer_version("1.9.9", "2.0.0"));
-    }
-
-    #[test]
-    fn test_is_newer_version_minor() {
-        assert!(is_newer_version("1.2.0", "1.1.9"));
-        assert!(!is_newer_version("1.1.9", "1.2.0"));
-    }
-
-    #[test]
-    fn test_is_newer_version_patch() {
-        assert!(is_newer_version("1.0.1", "1.0.0"));
-        assert!(!is_newer_version("1.0.0", "1.0.1"));
-    }
-
-    #[test]
-    fn test_is_newer_version_empty_parts() {
-        assert!(is_newer_version("1", "0.9.9"));
-        assert!(!is_newer_version("0.9.9", "1"));
-    }
-
-    #[test]
-    fn test_is_newer_version_equal() {
-        assert!(!is_newer_version("1.0.0", "1.0.0"));
-        assert!(!is_newer_version("2.5.10", "2.5.10"));
     }
 
     #[test]

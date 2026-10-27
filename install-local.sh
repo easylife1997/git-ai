@@ -38,25 +38,25 @@ INSTALL_DIR="$HOME/.easylife-ai/bin"
 
 # 自动更新服务端地址：客户端检查新版本时访问的 URL
 # 私有化部署时改为内部服务器地址（如 https://your-internal-server.com）
-UPDATE_RELEASE_URL_DEFAULT="https://github.com/easylife1997/easylife-ai/releases"
+UPDATE_RELEASE_URL_DEFAULT="http://localhost:5173/client"
 
 # 稳定版更新目标版本：每次发布时手动更新，格式为 x.y.z
 UPDATE_RELEASE_VERSION_DEFAULT="1.0.6"
 
 # 自动更新检查间隔（秒）：默认 86400 秒（24 小时）
 # 设为更大的值可降低检查频率；设为 0 时客户端行为由 disable_auto_updates 控制
-UPDATE_CHECK_INTERVAL_SECONDS_DEFAULT=3600
+UPDATE_CHECK_INTERVAL_SECONDS_DEFAULT=60
 
 # 更新通道：控制客户端跟踪哪个发布通道
 # 可选值：latest（稳定版）、next（预览版）
 UPDATE_CHANNEL_DEFAULT="latest"
 
-# 是否禁用自动更新：true = 锁定当前版本，不自动升级（默认）；false = 允许自动更新
-# 注意：此值仅在用户配置文件中不存在该字段时写入，已有配置的用户不受影响
-DISABLE_AUTO_UPDATES_DEFAULT=true
+# 是否禁用自动更新：false = 允许自动更新（默认）；true = 锁定当前版本，不自动升级
+# 注意：每次安装/更新都会覆盖用户配置文件中的该字段
+DISABLE_AUTO_UPDATES_DEFAULT=false
 
 # 是否禁用版本检查提示：false = 正常显示版本过旧提示（默认）；true = 静默跳过
-# 注意：与 disable_auto_updates 相同，仅在该字段缺失时写入
+# 注意：与 disable_auto_updates 相同，每次安装/更新都会覆盖
 DISABLE_VERSION_CHECKS_DEFAULT=false
 
 # ============================================================
@@ -207,8 +207,8 @@ if command -v jq >/dev/null 2>&1; then
              | .update_release_version = $update_release_version
              | .update_check_interval_seconds = $update_check_interval_seconds
              | .update_channel = $update_channel
-             | if has("disable_auto_updates") then . else .disable_auto_updates = $disable_auto_updates end
-             | if has("disable_version_checks") then . else .disable_version_checks = $disable_version_checks end' \
+             | .disable_auto_updates = $disable_auto_updates
+             | .disable_version_checks = $disable_version_checks' \
             "$CONFIG_JSON_PATH" > "$TMP_CFG"; then
             mv -f "$TMP_CFG" "$CONFIG_JSON_PATH"
         else
@@ -252,8 +252,8 @@ config["update_release_url"] = os.environ["UPDATE_RELEASE_URL_DEFAULT"]
 config["update_release_version"] = os.environ["UPDATE_RELEASE_VERSION_DEFAULT"]
 config["update_check_interval_seconds"] = int(os.environ["UPDATE_CHECK_INTERVAL_SECONDS_DEFAULT"])
 config["update_channel"] = os.environ["UPDATE_CHANNEL_DEFAULT"]
-config.setdefault("disable_auto_updates", os.environ["DISABLE_AUTO_UPDATES_DEFAULT"].lower() == "true")
-config.setdefault("disable_version_checks", os.environ["DISABLE_VERSION_CHECKS_DEFAULT"].lower() == "true")
+config["disable_auto_updates"] = os.environ["DISABLE_AUTO_UPDATES_DEFAULT"].lower() == "true"
+config["disable_version_checks"] = os.environ["DISABLE_VERSION_CHECKS_DEFAULT"].lower() == "true"
 with tmp_path.open("w", encoding="utf-8") as handle:
     json.dump(config, handle, indent=2)
     handle.write("\n")

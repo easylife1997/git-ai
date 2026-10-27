@@ -7790,6 +7790,11 @@ fn disable_trace2_for_daemon_process() {
 /// How often the daemon wakes up to evaluate whether an update check is due.
 const DAEMON_UPDATE_CHECK_INTERVAL_SECS: u64 = 3600;
 
+/// 更新检查循环的分片睡眠上限（秒）。循环把唤醒间隔切成不大于该值的分片，
+/// 每片都重读配置——用户手动调小 update_check_interval_seconds 后，
+/// 最多一个分片就能被发现，无需重启 daemon。
+const DAEMON_UPDATE_CHECK_WAKE_SLICE_SECS: u64 = 15;
+
 /// Maximum daemon uptime before a proactive restart (24.5 hours).
 /// Deliberately offset from the 24h update-check cadence so the uptime restart
 /// never races with an update-triggered shutdown.
@@ -7806,7 +7811,8 @@ fn daemon_update_check_interval() -> u64 {
     // The loop only re-evaluates whether an update check is due when it wakes,
     // so waking coarser than the configured check interval would silently
     // ignore a shorter `update_check_interval_seconds`.
-    let configured = crate::config::Config::get()
+    // 用 fresh 而非 OnceLock 的 get()：用户手动修改 config 后无需重启即生效。
+    let configured = crate::config::Config::fresh()
         .update_check_interval_seconds()
         .max(1);
     configured.min(DAEMON_UPDATE_CHECK_INTERVAL_SECS)
@@ -7956,24 +7962,36 @@ fn daemon_socket_health_check_loop(
 fn daemon_update_check_loop(coordinator: Arc<ActorDaemonCoordinator>, started_at_ns: u128) {
     use crate::commands::upgrade::{DaemonUpdateCheckResult, check_for_update_available};
 
-    let interval = daemon_update_check_interval().max(1);
-
     loop {
-        {
-            let guard = coordinator
-                .shutdown_condvar_mutex
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+        // 每轮重读配置计算唤醒间隔：用户手动修改 config 的
+        // update_check_interval_seconds 后无需重启 daemon 即可生效。
+        // 分片睡眠：既保证 shutdown 信号即时响应（condvar 唤醒），
+        // 也让间隔被调小时最多一个分片（15s）就被发现。
+        let mut waited: u64 = 0;
+        loop {
+            let interval = daemon_update_check_interval().max(1);
+            if waited >= interval {
+                break;
+            }
+            let slice = interval
+                .saturating_sub(waited)
+                .clamp(1, DAEMON_UPDATE_CHECK_WAKE_SLICE_SECS);
+            {
+                let guard = coordinator
+                    .shutdown_condvar_mutex
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                if coordinator.is_shutting_down() {
+                    return;
+                }
+                let _ = coordinator
+                    .shutdown_condvar
+                    .wait_timeout(guard, std::time::Duration::from_secs(slice));
+            }
             if coordinator.is_shutting_down() {
                 return;
             }
-            let _ = coordinator
-                .shutdown_condvar
-                .wait_timeout(guard, std::time::Duration::from_secs(interval));
-        }
-
-        if coordinator.is_shutting_down() {
-            return;
+            waited = waited.saturating_add(slice);
         }
 
         coordinator.gc_stale_family_state();
