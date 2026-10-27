@@ -53,7 +53,7 @@ UPDATE_CHANNEL_DEFAULT="latest"
 
 # 是否禁用自动更新：false = 允许自动更新（默认）；true = 锁定当前版本，不自动升级
 # 注意：每次安装/更新都会覆盖用户配置文件中的该字段
-DISABLE_AUTO_UPDATES_DEFAULT=false
+DISABLE_AUTO_UPDATES_DEFAULT=true
 
 # 是否禁用版本检查提示：false = 正常显示版本过旧提示（默认）；true = 静默跳过
 # 注意：与 disable_auto_updates 相同，每次安装/更新都会覆盖

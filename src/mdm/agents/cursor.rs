@@ -15,6 +15,11 @@ use std::path::PathBuf;
 // Command patterns for hooks
 const CURSOR_PRE_TOOL_USE_CMD: &str = "checkpoint cursor --hook-input stdin";
 const CURSOR_POST_TOOL_USE_CMD: &str = "checkpoint cursor --hook-input stdin";
+// Token/prompt reporting runs on the `stop` hook. It must NOT go through the
+// checkpoint preset, which rejects unknown hook events.
+const CURSOR_STOP_REPORT_CMD: &str = "report-token-usage cursor";
+
+type CommandMatcher = fn(&str) -> bool;
 
 pub struct CursorInstaller;
 
@@ -33,6 +38,37 @@ impl CursorInstaller {
             || ((cmd.contains("git-ai") || cmd.contains("easylife-ai"))
                 && cmd.contains("checkpoint")
                 && cmd.contains("cursor"))
+    }
+
+    fn is_cursor_report_command(cmd: &str) -> bool {
+        (cmd.contains("git-ai") || cmd.contains("easylife-ai"))
+            && cmd.contains("report-token-usage")
+            && cmd.contains("cursor")
+    }
+
+    /// Hook event -> matcher for the command this installer owns on that event.
+    fn managed_hooks() -> [(&'static str, CommandMatcher); 3] {
+        [
+            ("preToolUse", Self::is_cursor_checkpoint_command),
+            ("postToolUse", Self::is_cursor_checkpoint_command),
+            ("stop", Self::is_cursor_report_command),
+        ]
+    }
+
+    fn event_has_command(existing: &Value, event: &str, matcher: CommandMatcher) -> bool {
+        existing
+            .get("hooks")
+            .and_then(|h| h.get(event))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter().any(|hook| {
+                    hook.get("command")
+                        .and_then(|c| c.as_str())
+                        .map(matcher)
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false)
     }
 }
 
@@ -86,24 +122,17 @@ impl HookInstaller for CursorInstaller {
         let content = fs::read_to_string(&hooks_path)?;
         let existing: Value = serde_json::from_str(&content).unwrap_or_else(|_| json!({}));
 
-        let has_hooks = existing
-            .get("hooks")
-            .and_then(|h| h.get("preToolUse"))
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter().any(|hook| {
-                    hook.get("command")
-                        .and_then(|c| c.as_str())
-                        .map(Self::is_cursor_checkpoint_command)
-                        .unwrap_or(false)
-                })
-            })
-            .unwrap_or(false);
+        // Checkpoint hooks decide "installed"; the token-report `stop` hook is
+        // also required for "up to date" so existing installs get upgraded.
+        let has_hooks =
+            Self::event_has_command(&existing, "preToolUse", Self::is_cursor_checkpoint_command);
+        let has_report_hook =
+            Self::event_has_command(&existing, "stop", Self::is_cursor_report_command);
 
         Ok(HookCheckResult {
             tool_installed: true,
             hooks_installed: has_hooks,
-            hooks_up_to_date: has_hooks,
+            hooks_up_to_date: has_hooks && has_report_hook,
         })
     }
 
@@ -149,6 +178,12 @@ impl HookInstaller for CursorInstaller {
             CURSOR_POST_TOOL_USE_CMD
         );
 
+        let stop_report_cmd = format!(
+            "{} {}",
+            params.binary_path.display(),
+            CURSOR_STOP_REPORT_CMD
+        );
+
         // Desired hooks payload for Cursor
         let desired: Value = json!({
             "version": 1,
@@ -161,6 +196,11 @@ impl HookInstaller for CursorInstaller {
                 "postToolUse": [
                     {
                         "command": post_tool_use_cmd
+                    }
+                ],
+                "stop": [
+                    {
+                        "command": stop_report_cmd
                     }
                 ]
             }
@@ -179,18 +219,18 @@ impl HookInstaller for CursorInstaller {
         // Merge hooks object
         let mut hooks_obj = merged.get("hooks").cloned().unwrap_or_else(|| json!({}));
 
-        // Process both hook types
-        for hook_name in &["preToolUse", "postToolUse"] {
+        // Process every hook type this installer manages
+        for (hook_name, is_managed_command) in Self::managed_hooks() {
             let desired_hooks = desired
                 .get("hooks")
-                .and_then(|h| h.get(*hook_name))
+                .and_then(|h| h.get(hook_name))
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();
 
             // Get existing hooks array for this hook type
             let mut existing_hooks = hooks_obj
-                .get(*hook_name)
+                .get(hook_name)
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();
@@ -210,7 +250,7 @@ impl HookInstaller for CursorInstaller {
                 for (idx, existing_hook) in existing_hooks.iter().enumerate() {
                     if let Some(existing_cmd) =
                         existing_hook.get("command").and_then(|c| c.as_str())
-                        && Self::is_cursor_checkpoint_command(existing_cmd)
+                        && is_managed_command(existing_cmd)
                     {
                         found_idx = Some(idx);
                         if existing_cmd != desired_cmd {
@@ -285,14 +325,13 @@ impl HookInstaller for CursorInstaller {
 
         let mut changed = false;
 
-        // Remove git-ai checkpoint cursor commands from both hook types
-        for hook_name in &["preToolUse", "postToolUse"] {
-            if let Some(hooks_array) = hooks_obj.get_mut(*hook_name).and_then(|v| v.as_array_mut())
-            {
+        // Remove git-ai checkpoint and token-report commands from every managed hook type
+        for (hook_name, is_managed_command) in Self::managed_hooks() {
+            if let Some(hooks_array) = hooks_obj.get_mut(hook_name).and_then(|v| v.as_array_mut()) {
                 let original_len = hooks_array.len();
                 hooks_array.retain(|hook| {
                     if let Some(cmd) = hook.get("command").and_then(|c| c.as_str()) {
-                        !Self::is_cursor_checkpoint_command(cmd)
+                        !is_managed_command(cmd)
                     } else {
                         true
                     }
@@ -676,6 +715,65 @@ mod tests {
             pre_tool_use_cmd.contains("checkpoint cursor"),
             "command should still contain checkpoint args"
         );
+    }
+
+    #[test]
+    fn test_report_command_matcher_only_matches_cursor_report() {
+        let cmd = format!("/home/u/.easylife-ai/bin/easylife-ai {CURSOR_STOP_REPORT_CMD}");
+        assert!(CursorInstaller::is_cursor_report_command(&cmd));
+        assert!(CursorInstaller::is_cursor_report_command(
+            "/usr/local/bin/git-ai report-token-usage cursor"
+        ));
+        // Other platforms and the checkpoint command must not be claimed.
+        assert!(!CursorInstaller::is_cursor_report_command(
+            "easylife-ai report-token-usage codex"
+        ));
+        assert!(!CursorInstaller::is_cursor_report_command(
+            "easylife-ai checkpoint cursor --hook-input stdin"
+        ));
+        assert!(!CursorInstaller::is_cursor_report_command("echo stop"));
+        // And the checkpoint matcher must not claim the report command.
+        assert!(!CursorInstaller::is_cursor_checkpoint_command(&cmd));
+    }
+
+    #[test]
+    fn test_managed_hooks_cover_stop_with_report_matcher() {
+        let managed = CursorInstaller::managed_hooks();
+        let names: Vec<&str> = managed.iter().map(|(name, _)| *name).collect();
+        assert_eq!(names, vec!["preToolUse", "postToolUse", "stop"]);
+        let (_, stop_matcher) = managed.iter().find(|(n, _)| *n == "stop").unwrap();
+        assert!(stop_matcher("/x/easylife-ai report-token-usage cursor"));
+    }
+
+    #[test]
+    fn test_event_has_command_detects_missing_stop_hook() {
+        let old_install = json!({
+            "version": 1,
+            "hooks": {
+                "preToolUse": [{"command": "/b/easylife-ai checkpoint cursor --hook-input stdin"}],
+                "stop": [{"command": "echo user-own-stop-hook"}]
+            }
+        });
+        assert!(CursorInstaller::event_has_command(
+            &old_install,
+            "preToolUse",
+            CursorInstaller::is_cursor_checkpoint_command
+        ));
+        // A user's own stop hook is not ours, so the install is still outdated.
+        assert!(!CursorInstaller::event_has_command(
+            &old_install,
+            "stop",
+            CursorInstaller::is_cursor_report_command
+        ));
+        let upgraded = json!({"hooks": {"stop": [
+            {"command": "echo user-own-stop-hook"},
+            {"command": "/b/easylife-ai report-token-usage cursor"}
+        ]}});
+        assert!(CursorInstaller::event_has_command(
+            &upgraded,
+            "stop",
+            CursorInstaller::is_cursor_report_command
+        ));
     }
 
     #[test]

@@ -1,11 +1,12 @@
 //! Report token usage from AI coding sessions to the tracker server.
 //!
-//! Triggered by `Stop` hooks in Claude Code and Codex, and by the OpenCode
+//! Triggered by `Stop` hooks in Claude Code, Codex and Cursor, and by the OpenCode
 //! plugin's `session.idle` event, after a turn ends. Reads the latest session
 //! data from each platform's local store and uploads token usage statistics.
 
 pub mod claude;
 pub mod codex;
+pub mod cursor;
 pub mod opencode;
 
 use crate::commands::tracker::config as tracker_config;
@@ -93,14 +94,23 @@ pub struct TokenUsageData {
     pub turn_completed_at: Option<String>,
 }
 
+/// Build a `git` command, optionally rooted at `dir`.
+///
+/// Hooks that run from a fixed directory (Cursor user-level hooks run from
+/// `~/.cursor/`) pass the workspace root so repo lookups hit the right repo.
+fn git_command(dir: Option<&std::path::Path>) -> std::process::Command {
+    let mut cmd = std::process::Command::new("git");
+    if let Some(dir) = dir {
+        cmd.arg("-C").arg(dir);
+    }
+    cmd
+}
+
 /// Get the current user's git email for attribution.
-fn get_git_username() -> String {
+fn get_git_username(dir: Option<&std::path::Path>) -> String {
     // Try local, then global git config
     for scope in &["--local", "--global"] {
-        if let Ok(output) = std::process::Command::new("git")
-            .args([scope, "user.email"])
-            .output()
-        {
+        if let Ok(output) = git_command(dir).args([scope, "user.email"]).output() {
             if output.status.success() {
                 let email = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if !email.is_empty() {
@@ -119,8 +129,8 @@ fn get_git_username() -> String {
 }
 
 /// Get current repo URL if in a git repository.
-fn get_repo_url() -> Option<String> {
-    let output = std::process::Command::new("git")
+fn get_repo_url(dir: Option<&std::path::Path>) -> Option<String> {
+    let output = git_command(dir)
         .args(["remote", "get-url", "origin"])
         .output()
         .ok()?;
@@ -319,6 +329,21 @@ fn try_read_stop_hook_stdin() -> Option<StopHookPayload> {
     serde_json::from_str::<StopHookPayload>(&input).ok()
 }
 
+/// Read the Cursor `stop` hook stdin payload.
+/// Returns None if stdin is empty or not valid JSON for a Cursor stop event.
+fn try_read_cursor_stop_stdin() -> Option<cursor::CursorStopPayload> {
+    let stdin = io::stdin();
+    let mut handle = stdin.lock();
+    if handle.fill_buf().ok()?.is_empty() {
+        return None;
+    }
+    let mut input = String::new();
+    if handle.read_to_string(&mut input).is_err() || input.trim().is_empty() {
+        return None;
+    }
+    serde_json::from_str::<cursor::CursorStopPayload>(&input).ok()
+}
+
 /// Extract the value of `--session-id <value>` / `--session-id=<value>`.
 ///
 /// OpenCode has no per-session file to sort by, so its plugin passes the
@@ -345,7 +370,7 @@ fn parse_session_id_arg(args: &[String]) -> Option<String> {
 pub fn handle_report_token_usage(args: &[String]) {
     if args.is_empty() {
         eprintln!("Usage: easylife-ai report-token-usage <platform> [--session-id <id>]");
-        eprintln!("Platforms: claude-code, codex, opencode");
+        eprintln!("Platforms: claude-code, codex, cursor, opencode");
         std::process::exit(1);
     }
 
@@ -367,13 +392,7 @@ pub fn handle_report_token_usage(args: &[String]) {
     }
 
     // Get user identity: prefer config username, fallback to git email
-    let username = config
-        .username
-        .as_ref()
-        .filter(|u| !u.is_empty())
-        .cloned()
-        .unwrap_or_else(get_git_username);
-    let repo_url = get_repo_url();
+    let config_username = config.username.as_ref().filter(|u| !u.is_empty()).cloned();
 
     // Parse team_id with proper error handling
     let team_id = match config.team_id.parse::<i64>() {
@@ -387,6 +406,27 @@ pub fn handle_report_token_usage(args: &[String]) {
             return;
         }
     };
+
+    // Cursor's stop hook has its own stdin shape and runs from `~/.cursor/`, so
+    // the repo is located through the payload's workspace root.
+    let cursor_payload = if platform == "cursor" {
+        match try_read_cursor_stop_stdin() {
+            Some(p) => Some(p),
+            None => {
+                tracing::debug!("report-token-usage: no valid Cursor stop payload on stdin");
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    let workspace_dir: Option<std::path::PathBuf> = cursor_payload
+        .as_ref()
+        .and_then(|p| p.workspace_roots.first())
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_dir());
+    let username = config_username.unwrap_or_else(|| get_git_username(workspace_dir.as_deref()));
+    let repo_url = get_repo_url(workspace_dir.as_deref());
 
     // Try to read Stop hook stdin (contains transcript_path)
     let stdin_payload = if platform == "claude-code" || platform == "codex" {
@@ -455,6 +495,24 @@ pub fn handle_report_token_usage(args: &[String]) {
                 return;
             }
         },
+        "cursor" => {
+            // Safe: `cursor_payload` is always Some for this platform (see above).
+            let Some(payload) = cursor_payload.as_ref() else {
+                return;
+            };
+            match cursor::parse_turns(payload) {
+                Ok(Some((key, turns))) => (key, turns),
+                Ok(None) => {
+                    tracing::debug!("report-token-usage: no reportable Cursor turn");
+                    return;
+                }
+                Err(e) => {
+                    // Never exit non-zero: for Cursor hooks exit code 2 blocks the action.
+                    tracing::debug!("report-token-usage: failed to read Cursor data: {}", e);
+                    return;
+                }
+            }
+        }
         "opencode" => {
             match opencode::parse_turns(session_id_arg.as_deref()) {
                 Ok(Some((key, turns))) => (key, turns),
@@ -472,7 +530,7 @@ pub fn handle_report_token_usage(args: &[String]) {
         }
         _ => {
             eprintln!("Unknown platform: {}", platform);
-            eprintln!("Supported platforms: claude-code, codex, opencode");
+            eprintln!("Supported platforms: claude-code, codex, cursor, opencode");
             std::process::exit(1);
         }
     };
