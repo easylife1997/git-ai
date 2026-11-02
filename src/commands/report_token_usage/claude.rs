@@ -459,7 +459,16 @@ fn build_turn(
     service_tier: &Option<String>,
     file_path: &str,
 ) -> ParsedTurn {
-    let total = input_tokens + output_tokens + cache_read + cache_creation;
+    // Total counts every consumed token: input + output + cache_read +
+    // cache writes of ALL TTLs. `cache_creation` here is the 5m portion only
+    // (the aggregate was split in the caller), so add the 1h portion to cover
+    // the full picture. Server stores its own generated column from the
+    // component fields; this value keeps the payload self-consistent (v3.28).
+    let total = input_tokens
+        + output_tokens
+        + cache_read
+        + cache_creation
+        + ephemeral_1h_input_tokens.unwrap_or(0);
 
     // Build assistant_responses: concatenate all text blocks
     let assistant_responses = if assistant_texts.is_empty() {
@@ -949,8 +958,9 @@ mod tests {
         // drops to the 5m portion while 1h travels separately.
         assert_eq!(turns[1].cache_creation_tokens, 300);
         assert_eq!(turns[1].ephemeral_1h_input_tokens, Some(500));
-        // Total keeps the existing 4-field semantics (1h excluded).
-        assert_eq!(turns[1].total_tokens, 10 + 8 + 100 + 300);
+        // Total includes all cache-write TTLs (5m travels in
+        // cache_creation_tokens, 1h separately — both counted).
+        assert_eq!(turns[1].total_tokens, 10 + 8 + 100 + 300 + 500);
     }
 
     #[test]

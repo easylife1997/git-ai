@@ -199,7 +199,10 @@ mod cursor_report {
         assert_eq!(body["username"], "test-user");
         assert!(body.get("cost_usd").is_none(), "cost is left to the server");
         // Cursor has no serving tier: the key is still reported, as null.
-        assert!(body["service_tier"].is_null(), "service_tier is always reported");
+        assert!(
+            body["service_tier"].is_null(),
+            "service_tier is always reported"
+        );
 
         let state: Value = serde_json::from_str(
             &std::fs::read_to_string(home.path().join(".easylife-ai/reported-turns.json")).unwrap(),
