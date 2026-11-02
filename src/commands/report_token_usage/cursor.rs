@@ -289,9 +289,11 @@ fn build_current_turn(
         output_tokens: output,
         cache_read_tokens: cache_read,
         cache_creation_tokens: cache_creation,
+        // Cursor does not expose a cache-TTL split; reported as null.
+        ephemeral_1h_input_tokens: None,
+        // Cursor exposes no serving tier in the local payload.
+        service_tier: None,
         total_tokens: input + output + cache_read + cache_creation,
-        // Cost is computed by the backend from `model_pricing`.
-        cost_usd: None,
         repo_url: None,
         project_name: payload
             .workspace_roots
@@ -445,7 +447,7 @@ mod tests {
             Some("part one\n\npart two")
         );
         assert_eq!(usage.project_name.as_deref(), Some("demo-proj"));
-        assert!(usage.cost_usd.is_none());
+        assert!(usage.service_tier.is_none());
         assert!(usage.turn_completed_at.is_some());
     }
 

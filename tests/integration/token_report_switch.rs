@@ -190,12 +190,16 @@ mod cursor_report {
         assert_eq!(body["output_tokens"], 200);
         assert_eq!(body["cache_read_tokens"], 300);
         assert_eq!(body["cache_creation_tokens"], 40);
+        // Cursor has no cache-TTL split: the key must still be reported, as null.
+        assert!(body["ephemeral_1h_input_tokens"].is_null());
         assert_eq!(body["total_tokens"], 1540);
         assert_eq!(body["user_prompts"], "second question");
         assert_eq!(body["assistant_responses"], "answer two");
         assert_eq!(body["repo_url"], "https://example.com/acme/demo.git");
         assert_eq!(body["username"], "test-user");
         assert!(body.get("cost_usd").is_none(), "cost is left to the server");
+        // Cursor has no serving tier: the key is still reported, as null.
+        assert!(body["service_tier"].is_null(), "service_tier is always reported");
 
         let state: Value = serde_json::from_str(
             &std::fs::read_to_string(home.path().join(".easylife-ai/reported-turns.json")).unwrap(),

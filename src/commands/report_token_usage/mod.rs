@@ -50,9 +50,14 @@ pub struct TokenUsagePayload {
     pub output_tokens: i64,
     pub cache_read_tokens: i64,
     pub cache_creation_tokens: i64,
+    /// 1-hour-TTL cache writes. `None` when the platform has no such data
+    /// (codex/cursor/opencode); the JSON key is still reported, as null.
+    pub ephemeral_1h_input_tokens: Option<i64>,
+    /// API serving tier (e.g. `standard` / `priority`). `None` when the
+    /// platform has no such data; the JSON key is still reported, as null.
+    /// Billing is server-side: no cost is ever reported by the client.
+    pub service_tier: Option<String>,
     pub total_tokens: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cost_usd: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repo_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -79,8 +84,13 @@ pub struct TokenUsageData {
     pub output_tokens: i64,
     pub cache_read_tokens: i64,
     pub cache_creation_tokens: i64,
+    /// 1-hour-TTL cache writes; `None` when the platform has no such data
+    /// (codex/cursor/opencode).
+    pub ephemeral_1h_input_tokens: Option<i64>,
+    /// API serving tier (e.g. `standard` / `priority`); `None` when the
+    /// platform does not expose it.
+    pub service_tier: Option<String>,
     pub total_tokens: i64,
-    pub cost_usd: Option<f64>,
     pub repo_url: Option<String>,
     pub project_name: Option<String>,
     pub user_prompts: Option<String>,
@@ -577,8 +587,9 @@ pub fn handle_report_token_usage(args: &[String]) {
             output_tokens: turn.output_tokens,
             cache_read_tokens: turn.cache_read_tokens,
             cache_creation_tokens: turn.cache_creation_tokens,
+            ephemeral_1h_input_tokens: turn.ephemeral_1h_input_tokens,
+            service_tier: turn.service_tier.clone(),
             total_tokens: turn.total_tokens,
-            cost_usd: turn.cost_usd,
             repo_url: turn.repo_url.clone().or(repo_url.clone()),
             project_name: turn.project_name.clone(),
             user_prompts: turn.user_prompts.clone(),

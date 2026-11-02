@@ -568,8 +568,11 @@ pub fn parse_turns_from_path(
             output_tokens: turn.output_tokens,
             cache_read_tokens: turn.cache_read_tokens,
             cache_creation_tokens: turn.cache_creation_tokens,
+            // Codex/OpenAI exposes no cache-TTL split; reported as null.
+            ephemeral_1h_input_tokens: None,
+            // Codex responses carry no service tier in the local store.
+            service_tier: None,
             total_tokens: turn.total_tokens,
-            cost_usd: None,
             repo_url: None,
             project_name: None,
             user_prompts: if turn.user_content.is_empty() {

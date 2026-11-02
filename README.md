@@ -368,9 +368,10 @@ easylife-ai report-token-usage codex          # 上报 Codex 最新会话
 | `input_tokens` | 会话日志 | 非缓存输入 token |
 | `output_tokens` | 会话日志 | 输出 token |
 | `cache_read_tokens` | 会话日志 | 缓存读取 token |
-| `cache_creation_tokens` | 会话日志 | 缓存创建 token |
+| `cache_creation_tokens` | 会话日志 | 缓存创建 token；Claude Code 为 5 分钟 TTL 写入（`ephemeral_5m_input_tokens`），其余平台为平台聚合值 |
+| `ephemeral_1h_input_tokens` | 会话日志（可空） | 1 小时 TTL 缓存写入；仅 Claude Code 采集，其余平台上报 null |
 | `total_tokens` | 会话日志 | 总 token 数 |
-| `cost_usd` | 会话日志（可空） | 费用，缺失时由服务端按模型价格计算 |
+| `service_tier` | 会话日志（可空） | API 服务档位（如 `standard` / `priority`）；仅 Claude Code 采集（`usage.service_tier`），其余平台上报 null |
 | `repo_url` | 会话数据或当前 repo `origin` | 远端仓库 URL（可空） |
 | `project_name` | 会话路径解析（可空） | 项目名称，Claude 从路径提取，Codex 暂不支持 |
 | `reported_at` | 当前时间 UTC（RFC3339） | 上报时间 |

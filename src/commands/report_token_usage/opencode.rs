@@ -524,8 +524,10 @@ fn parse_turns_v2(
             output_tokens: t.output,
             cache_read_tokens: t.cache_read,
             cache_creation_tokens: t.cache_write,
+            // OpenCode storage has no cache-TTL split; reported as null.
+            ephemeral_1h_input_tokens: None,
+            service_tier: None,
             total_tokens: total,
-            cost_usd: None,
             repo_url: repo_url.clone(),
             project_name: None,
             user_prompts: non_empty(&t.user),
@@ -735,10 +737,11 @@ fn parse_turns_from_db(db_path: &Path, session_id: &str) -> Result<Vec<TokenUsag
             output_tokens: acc.output_tokens,
             cache_read_tokens: acc.cache_read,
             cache_creation_tokens: acc.cache_creation,
+            // OpenCode storage has no cache-TTL split; reported as null.
+            ephemeral_1h_input_tokens: None,
+            // OpenCode exposes no serving tier in the local store.
+            service_tier: None,
             total_tokens: total,
-            // Cost is intentionally left to the backend, which recomputes it
-            // from `model_pricing`. OpenCode's own `data.cost` is not sent.
-            cost_usd: None,
             repo_url: repo_url.clone(),
             project_name: None, // backend derives this from repo_url
             user_prompts: if acc.user_content.is_empty() {
@@ -983,7 +986,7 @@ mod tests {
 
         assert_eq!(t.user_prompts.as_deref(), Some("hello world"));
         assert_eq!(t.assistant_responses.as_deref(), Some("done!"));
-        assert!(t.cost_usd.is_none());
+        assert!(t.service_tier.is_none());
 
         // Native turn timing surfaces from the user's created and the final
         // assistant's completed epoch-ms (10 -> 40, rendered UTC+8 RFC3339).

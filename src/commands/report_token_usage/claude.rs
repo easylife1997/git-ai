@@ -52,8 +52,13 @@ pub struct ParsedTurn {
     pub output_tokens: i64,
     pub cache_read_tokens: i64,
     pub cache_creation_tokens: i64,
+    /// 1-hour-TTL cache writes; `None` when the transcript's usage lines carry
+    /// no `cache_creation` split object (older Claude Code).
+    pub ephemeral_1h_input_tokens: Option<i64>,
+    /// Service tier reported by the API (e.g. `standard` / `priority`); the
+    /// server decides which tiers count as fast for billing.
+    pub service_tier: Option<String>,
     pub total_tokens: i64,
-    pub cost_usd: Option<f64>,
     pub project_name: Option<String>,
     pub repo_url: Option<String>,
 }
@@ -70,9 +75,6 @@ struct JsonlLine {
     #[serde(default)]
     timestamp: Option<String>,
     message: Option<Value>,
-    cost_usd: Option<f64>,
-    #[serde(rename = "costUSD")]
-    cost_usd_alt: Option<f64>,
 }
 
 /// Maximum length for tool_result content (characters).
@@ -113,13 +115,20 @@ fn parse_turns_from_content(content: &str, file_path: &str) -> Vec<ParsedTurn> {
     let mut turn_input_tokens: i64 = 0;
     let mut turn_output_tokens: i64 = 0;
     let mut turn_cache_read: i64 = 0;
-    let mut turn_cache_creation: i64 = 0;
+    // Cache writes split by TTL: `turn_cache_creation_5m` feeds
+    // cache_creation_tokens; the 1h portion travels separately. `turn_1h_seen`
+    // stays false when usage lines carry no `cache_creation` object (older
+    // Claude Code), which reports the 1h split as null for the turn.
+    let mut turn_cache_creation_5m: i64 = 0;
+    let mut turn_cache_creation_1h: i64 = 0;
+    let mut turn_1h_seen = false;
     let mut turn_model: Option<String> = None;
-    let mut turn_cost: Option<f64> = None;
+    // Last non-null `usage.service_tier` in the turn wins: the tier of the
+    // most recent billed API call represents how the turn was served.
+    let mut turn_service_tier: Option<String> = None;
     let mut seen_msg_ids: HashSet<String> = HashSet::new();
 
     let mut session_id: Option<String> = None;
-    let mut cost_accum: f64 = 0.0;
 
     for line in content.lines() {
         if line.trim().is_empty() {
@@ -133,12 +142,6 @@ fn parse_turns_from_content(content: &str, file_path: &str) -> Vec<ParsedTurn> {
 
         if session_id.is_none() {
             session_id = entry.session_id.clone();
-        }
-
-        // Accumulate cost
-        let line_cost = entry.cost_usd.or(entry.cost_usd_alt).unwrap_or(0.0);
-        if line_cost > 0.0 {
-            cost_accum += line_cost;
         }
 
         let Some(msg) = &entry.message else { continue };
@@ -191,7 +194,7 @@ fn parse_turns_from_content(content: &str, file_path: &str) -> Vec<ParsedTurn> {
                         let total = turn_input_tokens
                             + turn_output_tokens
                             + turn_cache_read
-                            + turn_cache_creation;
+                            + turn_cache_creation_5m;
                         if total > 0 || !turn_assistant_texts.is_empty() {
                             turns.push(build_turn(
                                 &session_id,
@@ -204,11 +207,11 @@ fn parse_turns_from_content(content: &str, file_path: &str) -> Vec<ParsedTurn> {
                                 turn_input_tokens,
                                 turn_output_tokens,
                                 turn_cache_read,
-                                turn_cache_creation,
+                                turn_cache_creation_5m,
+                                turn_1h_seen.then_some(turn_cache_creation_1h),
                                 &turn_model,
-                                turn_cost,
+                                &turn_service_tier,
                                 file_path,
-                                cost_accum,
                             ));
                         }
                     }
@@ -226,9 +229,11 @@ fn parse_turns_from_content(content: &str, file_path: &str) -> Vec<ParsedTurn> {
                     turn_input_tokens = 0;
                     turn_output_tokens = 0;
                     turn_cache_read = 0;
-                    turn_cache_creation = 0;
+                    turn_cache_creation_5m = 0;
+                    turn_cache_creation_1h = 0;
+                    turn_1h_seen = false;
                     turn_model = None;
-                    turn_cost = None;
+                    turn_service_tier = None;
                     seen_msg_ids.clear();
                 } else {
                     // LIST content = tool_result messages
@@ -280,7 +285,7 @@ fn parse_turns_from_content(content: &str, file_path: &str) -> Vec<ParsedTurn> {
                             .get("cache_read_input_tokens")
                             .and_then(|v| v.as_i64())
                             .unwrap_or(0);
-                        let cache_creation = usage
+                        let cache_creation_aggregate = usage
                             .get("cache_creation_input_tokens")
                             .and_then(|v| v.as_i64())
                             .unwrap_or(0);
@@ -291,16 +296,31 @@ fn parse_turns_from_content(content: &str, file_path: &str) -> Vec<ParsedTurn> {
                         turn_input_tokens += input;
                         turn_output_tokens += output;
                         turn_cache_read += cache_read;
-                        turn_cache_creation += cache_creation;
-
-                        turn_cost = Some(
-                            turn_cost.unwrap_or(0.0)
-                                + usage
-                                    .get("output_tokens")
+                        // `cache_creation` carries the TTL split: the 5m portion
+                        // feeds cache_creation_tokens and the 1h portion travels
+                        // separately. Older transcripts only carry the aggregate:
+                        // treat it as 5m and leave the 1h split uncollected.
+                        match usage.get("cache_creation") {
+                            Some(split) => {
+                                turn_cache_creation_5m += split
+                                    .get("ephemeral_5m_input_tokens")
                                     .and_then(|v| v.as_i64())
-                                    .unwrap_or(0) as f64
-                                    * 0.0, // approximate, real cost from cost_usd
-                        );
+                                    .unwrap_or(cache_creation_aggregate);
+                                turn_cache_creation_1h += split
+                                    .get("ephemeral_1h_input_tokens")
+                                    .and_then(|v| v.as_i64())
+                                    .unwrap_or(0);
+                                turn_1h_seen = true;
+                            }
+                            None => turn_cache_creation_5m += cache_creation_aggregate,
+                        }
+
+                        // Capture the serving tier for server-side fast billing.
+                        if let Some(tier) = usage.get("service_tier").and_then(|v| v.as_str()) {
+                            if !tier.is_empty() {
+                                turn_service_tier = Some(tier.to_string());
+                            }
+                        }
                     }
 
                     // Extract model
@@ -376,7 +396,8 @@ fn parse_turns_from_content(content: &str, file_path: &str) -> Vec<ParsedTurn> {
 
     // Finalize last turn
     if in_turn {
-        let total = turn_input_tokens + turn_output_tokens + turn_cache_read + turn_cache_creation;
+        let total =
+            turn_input_tokens + turn_output_tokens + turn_cache_read + turn_cache_creation_5m;
         if total > 0 || !turn_assistant_texts.is_empty() {
             turns.push(build_turn(
                 &session_id,
@@ -389,11 +410,11 @@ fn parse_turns_from_content(content: &str, file_path: &str) -> Vec<ParsedTurn> {
                 turn_input_tokens,
                 turn_output_tokens,
                 turn_cache_read,
-                turn_cache_creation,
+                turn_cache_creation_5m,
+                turn_1h_seen.then_some(turn_cache_creation_1h),
                 &turn_model,
-                turn_cost,
+                &turn_service_tier,
                 file_path,
-                cost_accum,
             ));
         }
     }
@@ -433,10 +454,10 @@ fn build_turn(
     output_tokens: i64,
     cache_read: i64,
     cache_creation: i64,
+    ephemeral_1h_input_tokens: Option<i64>,
     model: &Option<String>,
-    _cost: Option<f64>,
+    service_tier: &Option<String>,
     file_path: &str,
-    _cost_accum: f64,
 ) -> ParsedTurn {
     let total = input_tokens + output_tokens + cache_read + cache_creation;
 
@@ -489,8 +510,9 @@ fn build_turn(
         output_tokens,
         cache_read_tokens: cache_read,
         cache_creation_tokens: cache_creation,
+        ephemeral_1h_input_tokens,
+        service_tier: service_tier.clone(),
         total_tokens: total,
-        cost_usd: None, // Will be calculated by backend
         project_name,
         repo_url: None,
     }
@@ -681,8 +703,9 @@ pub fn parse_turns_from_path(path: &str) -> Result<Vec<TokenUsageData>, String> 
             output_tokens: turn.output_tokens,
             cache_read_tokens: turn.cache_read_tokens,
             cache_creation_tokens: turn.cache_creation_tokens,
+            ephemeral_1h_input_tokens: turn.ephemeral_1h_input_tokens,
+            service_tier: turn.service_tier.clone(),
             total_tokens: turn.total_tokens,
-            cost_usd: turn.cost_usd,
             repo_url: turn.repo_url.clone(),
             project_name: turn.project_name.clone(),
             user_prompts: if turn.user_content.is_empty() {
@@ -877,5 +900,103 @@ mod tests {
             turns[0].turn_completed_at.as_deref(),
             Some("2026-10-20T07:14:12.900Z")
         );
+    }
+
+    /// Real usage shape from Claude Code transcripts: the aggregate equals
+    /// 5m + 1h and the `cache_creation` object carries the TTL split.
+    fn response_with_ttl_split(
+        id: &str,
+        input: i64,
+        output: i64,
+        read: i64,
+        five_m: i64,
+        one_h: i64,
+    ) -> Value {
+        json!({
+            "type": "assistant", "sessionId": "session",
+            "message": {
+                "role": "assistant", "id": id, "model": "claude-sonnet-4-6",
+                "content": [{"type": "text", "text": "Done."}],
+                "stop_reason": "end_turn",
+                "usage": {
+                    "input_tokens": input, "output_tokens": output,
+                    "cache_read_input_tokens": read,
+                    "cache_creation_input_tokens": five_m + one_h,
+                    "cache_creation": {
+                        "ephemeral_5m_input_tokens": five_m,
+                        "ephemeral_1h_input_tokens": one_h
+                    }
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn cache_creation_tokens_carry_the_5m_ttl_split() {
+        let content = transcript(&[
+            prompt("typed", "Hello"),
+            response_with_ttl_split("msg-1", 10, 8, 100, 6890, 0),
+            prompt("typed", "Again"),
+            response_with_ttl_split("msg-2", 10, 8, 100, 300, 500),
+        ]);
+
+        let turns = parse_turns_from_content(&content, "session.jsonl");
+        assert_eq!(turns.len(), 2);
+        // 5m-only response: cache_creation_tokens is the 5m portion.
+        assert_eq!(turns[0].cache_creation_tokens, 6890);
+        assert_eq!(turns[0].ephemeral_1h_input_tokens, Some(0));
+        // Mixed response: the 800-token aggregate splits; cache_creation_tokens
+        // drops to the 5m portion while 1h travels separately.
+        assert_eq!(turns[1].cache_creation_tokens, 300);
+        assert_eq!(turns[1].ephemeral_1h_input_tokens, Some(500));
+        // Total keeps the existing 4-field semantics (1h excluded).
+        assert_eq!(turns[1].total_tokens, 10 + 8 + 100 + 300);
+    }
+
+    #[test]
+    fn service_tier_captured_from_usage() {
+        let with_tier = |id: &str, tier: Value| {
+            json!({
+                "type": "assistant", "sessionId": "session",
+                "message": {
+                    "role": "assistant", "id": id, "model": "claude-sonnet-4-6",
+                    "content": [{"type": "text", "text": "Done."}],
+                    "stop_reason": "end_turn",
+                    "usage": {
+                        "input_tokens": 10, "output_tokens": 8,
+                        "cache_read_input_tokens": 0,
+                        "cache_creation_input_tokens": 0,
+                        "service_tier": tier
+                    }
+                }
+            })
+        };
+        // Last non-null tier in the turn wins (most recent billed API call).
+        let content = transcript(&[
+            prompt("typed", "Hello"),
+            with_tier("msg-1", json!("standard")),
+            with_tier("msg-2", json!("priority")),
+        ]);
+        let turns = parse_turns_from_content(&content, "session.jsonl");
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].service_tier.as_deref(), Some("priority"));
+
+        // No usage.service_tier at all -> None.
+        let content = transcript(&[prompt("typed", "Hi"), response("msg-1", 10, 8, 0, 0)]);
+        let turns = parse_turns_from_content(&content, "session.jsonl");
+        assert_eq!(turns.len(), 1);
+        assert!(turns[0].service_tier.is_none());
+    }
+
+    #[test]
+    fn cache_creation_without_split_object_falls_back_to_aggregate() {
+        // Older transcripts carry only cache_creation_input_tokens; the whole
+        // aggregate then counts as 5m and the 1h split stays uncollected.
+        let content = transcript(&[prompt("typed", "Hello"), response("msg-1", 10, 8, 100, 500)]);
+
+        let turns = parse_turns_from_content(&content, "session.jsonl");
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].cache_creation_tokens, 500);
+        assert_eq!(turns[0].ephemeral_1h_input_tokens, None);
     }
 }
