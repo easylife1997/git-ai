@@ -435,3 +435,19 @@ easylife-ai ops-check   # 打印一段交给 AI 智能体的排查 prompt（自�
 | 日志中大量 `已上报过` | 正常现象，push 时扫描了已上报的历史 commit | 无需处理 |
 | `Unknown easylife-ai command: doctor` | 本地构建被线上 release 覆盖 | 重跑 `task dev`；`scripts/dev.sh` 已自动关闭自动更新 |
 | token 无数据但 hook 正常 | `token_report` 被关闭 | 检查 `tracker-config.json` 的 `token_report`，缺失时默认 `true` |
+
+---
+
+## 开源声明（Open Source Attribution）
+
+本产品基于开源项目 [git-ai](https://github.com/git-ai-project/git-ai)（**Copyright 2025 Aidan Cunniffe**）修改开发，并针对 easylife-ai 的商业化场景做了大量定制改造。
+
+| 项目 | 说明 |
+|------|------|
+| 上游项目 | [git-ai-project/git-ai](https://github.com/git-ai-project/git-ai) |
+| 上游许可证 | **Apache License 2.0**（完整文本见本仓库 [LICENSE](LICENSE)，勿修改该文件） |
+| 版权与归属声明 | 见本仓库 [NOTICE](NOTICE) |
+| 修改声明 | 依据 Apache License 2.0 第 4(b) 条，对上游文件的修改通过 NOTICE 文件及源码文件头注明 |
+| 修改部分版权 | 本项目对上游代码的修改及新增代码版权归 easylife-ai 主体所有；Apache License 2.0 第 4 条明确允许对修改部分使用独立授权条款 |
+
+> 商标提示：Apache License 2.0 第 6 条不授予上游名称/商标的使用权。对外宣传与产品命名一律使用 easylife-ai 品牌，"git-ai" 仅作为描述代码来源（fair descriptive use）及内部二进制功能名使用。

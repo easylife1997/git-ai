@@ -1,0 +1,43 @@
+easylife-ai (Git-AI Tracker)
+Copyright 2026 [请替换为公司/主体名称]
+
+本产品基于开源项目 git-ai 修改开发。依据 Apache License 2.0 第 4 条，
+本文件保留上游项目的全部归属声明（attribution notices）。
+
+========================================================================
+
+本产品包含以下开源项目的代码（This product includes software from the
+following open source project）：
+
+  git-ai — A Git extension for tracking the AI-generated code in your repos
+  https://github.com/git-ai-project/git-ai
+  Copyright 2025 Aidan Cunniffe
+
+  以 Apache License, Version 2.0 授权（Licensed under the Apache License,
+  Version 2.0）。许可证全文见本仓库 LICENSE 文件，或访问：
+  http://www.apache.org/licenses/LICENSE-2.0
+
+========================================================================
+
+修改说明（NOTICE OF MODIFICATIONS）
+
+  本仓库（easylife-ai 客户端）自上游项目 fork 后进行了大量修改，
+  包括但不限于：代码统计上报（tracker）、token 用量上报
+  （report-token-usage）、配置体系（~/.easylife-ai/）、安装脚本
+  （install.sh / install.ps1）、品牌与命令行入口（easylife-ai）等，
+  以满足企业内部代码贡献统计与 AI 成本分析的商业化需求。
+
+  依据 Apache License 2.0 第 4(b) 条，对上游源文件做出的修改均
+  以文件头注释或其他显著方式注明；未修改的上游文件保留原始声明。
+
+========================================================================
+
+版权归属（COPYRIGHT）
+
+  1. 上游原始代码：Copyright 2025 Aidan Cunniffe（Apache License 2.0）
+  2. 本项目对上游代码的修改部分及新增代码：
+     Copyright 2026 [请替换为公司/主体名称]，保留所有权利。
+
+  本产品的修改部分与新增部分独立授权，不向上游项目反哺
+  （未向上游提交 Contribution），也不影响上游代码在 Apache 2.0
+  下的原始授权。
